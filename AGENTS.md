@@ -2,44 +2,55 @@
 
 Cisco Secure Client auto-connect tool with DUO 2FA support.
 
+## Current Status
+
+- **Multi-Profile Support**: Implemented (vpn-add/ls/use/rm/edit)
+- **One-Click Settings**: Implemented (vpn-set)
+- **GUI Manager**: Implemented (vpn-gui.py) with DKU preset
+- **QR Tools**: Integrated (qrdecode.py + qrdecode_gui.py)
+- **GitHub Ready**: .gitignore, LICENSE, README.md, git initialized
+
+## Current Goal
+
+GUI DKU preset simplification: Remove the "Name" field from DKU preset dialog.
+Since DKU is a preset, the profile name should be auto-set to "dku" — no user input needed.
+Only require: NetID, Password, Group (dropdown).
+
 ## File Structure
 
 ```
-tools/vpn-auto-connect/        # Project folder
+tools/vpn-auto-connect/
 ├── AGENTS.md                  # This file
-├── vpn-auto-connect.ps1       # Core script (PowerShell 7+)
+├── README.md                  # Bilingual documentation
+├── LICENSE                    # MIT License
+├── .gitignore
+├── vpn-auto-connect.ps1       # Core script (PowerShell)
 ├── vpn_auto_connect.py        # Alternative (Python + wexpect)
-└── cmd/                       # Entry point scripts
-    ├── vpn.cmd                # List commands
-    ├── vpn-connect.cmd        # Connect
-    ├── vpn-disconnect.cmd     # Disconnect
-    ├── vpn-status.cmd         # Show status
-    ├── vpn-setup.cmd          # First-time setup (legacy)
-    ├── vpn-totp.cmd           # Save TOTP secret
-    ├── vpn-reconfig.cmd       # Reset and reconfigure
-    ├── vpn-help.cmd           # Show help
-    ├── vpn-add.cmd            # Add new profile
-    ├── vpn-ls.cmd             # List all profiles
-    ├── vpn-use.cmd            # Switch active profile
-    ├── vpn-rm.cmd             # Remove a profile
-    ├── vpn-edit.cmd           # Edit profile settings
-    └── vpn-set.cmd            # Quick setting change
-
-Config: ~/.vpn-auto-connect/
-├── config.json                # Server, Group, Port, Protocol (legacy)
-├── credentials.xml            # DPAPI encrypted username/password (legacy)
-├── totp.xml                   # DPAPI encrypted TOTP secret
-├── profiles.json              # Index of all profiles
-├── active_profile             # Current active profile name
-└── profiles/                  # Multi-profile storage
-    ├── dku/
-    │   ├── config.json
-    │   ├── credentials.xml
-    │   └── totp.xml
-    └── company/
-        ├── config.json
-        ├── credentials.xml
-        └── totp.xml
+├── vpn-gui.bat                # GUI launcher
+│
+├── cmd/                       # Entry point scripts (ASCII-only @REM comments)
+│   ├── vpn.cmd                # List commands
+│   ├── vpn-connect.cmd        # Connect
+│   ├── vpn-disconnect.cmd     # Disconnect
+│   ├── vpn-status.cmd         # Show status
+│   ├── vpn-setup.cmd          # First-time setup (legacy)
+│   ├── vpn-totp.cmd           # Save TOTP secret
+│   ├── vpn-reconfig.cmd       # Reset and reconfigure
+│   ├── vpn-help.cmd           # Show help
+│   ├── vpn-add.cmd            # Add new profile
+│   ├── vpn-ls.cmd             # List all profiles
+│   ├── vpn-use.cmd            # Switch active profile
+│   ├── vpn-rm.cmd             # Remove a profile
+│   ├── vpn-edit.cmd           # Edit profile settings
+│   ├── vpn-set.cmd            # Quick setting change
+│   └── vpn-gui.cmd            # Launch GUI
+│
+└── tools/                     # Auxiliary tools
+    ├── qrdecode.py            # QR decoder (CLI)
+    ├── qrdecode_gui.py        # QR decoder (GUI)
+    ├── qrdecode.bat           # CLI launcher
+    ├── qrgui.bat              # GUI launcher
+    └── vpn-gui.py             # VPN GUI manager
 ```
 
 ## Main Interfaces
@@ -57,14 +68,26 @@ Config: ~/.vpn-auto-connect/
 | `vpn-reconfig` | (none) | Clear all config, re-run full setup |
 | `vpn-help` | (none) | Show detailed help |
 
-### PowerShell Short Aliases (profile)
+### Profile Commands
 
-| Alias | Target |
-|-------|--------|
-| `vpnc` | vpn-connect |
-| `vpnd` | vpn-disconnect |
-| `vpns` | vpn-status |
-| `vpn-rcfg` | vpn-reconfig |
+| Command | Parameters | Description |
+|---------|-----------|-------------|
+| `vpn-add` | (none) | Add new VPN profile |
+| `vpn-ls` | (none) | List all profiles |
+| `vpn-use` | `<name>` | Switch active profile |
+| `vpn-rm` | `<name>` | Remove a profile |
+| `vpn-edit` | `<name>` | Edit profile settings |
+| `vpn-set` | `<key> <value>` | Quick setting change |
+| `vpn-gui` | (none) | Launch GUI manager |
+
+### GUI DKU Preset
+
+When "Duke Kunshan VPN" preset is selected in GUI:
+- Server: `portal.dukekunshan.edu.cn` (pre-filled, hidden)
+- Port: `443` (pre-filled, hidden)
+- Protocol: `ssl` (pre-filled, hidden)
+- Profile name: auto-set to `dku` (no user input)
+- User input required: **NetID**, **Password**, **Group** (dropdown: -Default- / Library Resources Only)
 
 ### Direct Script Usage
 
@@ -95,30 +118,28 @@ python vpn_auto_connect.py --connect --duo-method passcode
 | `-SaveTOTP` | switch | false | - | Save/update TOTP secret only |
 | `-Reconfigure` | switch | false | - | Clear config, full re-setup |
 
-### Utility Parameters
+### Profile Parameters
 
 | Parameter | Type | Default | Values | Description |
 |-----------|------|---------|--------|-------------|
-| `-Help` | switch | false | - | Show help text |
-| `-List` | switch | false | - | Show command list |
+| `-Add` | switch | false | - | Add new profile |
+| `-Ls` | switch | false | - | List all profiles |
+| `-Use` | string | (none) | profile name | Switch active profile |
+| `-Rm` | string | (none) | profile name | Remove profile |
+| `-Edit` | string | (none) | profile name | Edit profile |
+| `-Set` | string | (none) | server/group/port/protocol/user/duo | Setting key |
+| `-SetValue` | string | (none) | (any) | Setting value |
 
 ### Config File Schema (config.json)
 
 ```json
 {
     "Server":   "portal.dukekunshan.edu.cn",
-    "Group":    "",
+    "Group":    "-Default-",
     "Port":     "443",
     "Protocol": "ssl"
 }
 ```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| Server | string | (required) | VPN gateway FQDN or IP |
-| Group | string | "" | VPN group name (empty = skip) |
-| Port | string | "443" | VPN server port |
-| Protocol | string | "ssl" | ssl, ipsec, any |
 
 ### DUO Methods
 
@@ -172,118 +193,6 @@ vpn-connect
   └─ Check VPN IP (10.x.x.x = connected)
 ```
 
-## TODO / Planned Features
-
-### 1. Multi-Profile Support (Priority: High) ✅ IMPLEMENTED
-
-**Goal:** After setup is complete, allow adding new server profiles without overwriting existing ones.
-
-**Design:**
-```
-~/.vpn-auto-connect/
-├── profiles/
-│   ├── dku/
-│   │   ├── config.json
-│   │   ├── credentials.xml
-│   │   └── totp.xml
-│   ├── company/
-│   │   ├── config.json
-│   │   ├── credentials.xml
-│   │   └── totp.xml
-│   └── home-lab/
-│       ├── config.json
-│       ├── credentials.xml
-│       └── totp.xml
-├── active_profile           # contains current profile name
-└── profiles.json            # index of all profiles
-```
-
-**Rules:**
-- `vpn-reconfig` clears ALL profiles, starts fresh
-- `vpn-setup` after initial setup adds NEW profile (does not overwrite)
-- New profile requires ALL 4 fields (Server, Group, Port, Protocol) to be set
-- If setup is incomplete (missing fields), do NOT create profile
-- `vpn-use <profile>` switches active profile
-- `vpn-ls` lists all profiles
-
-**Commands:**
-```powershell
-vpn-add              # Add new profile (prompts for all fields)
-vpn-use <name>       # Switch active profile
-vpn-ls               # List all profiles
-vpn-rm <name>        # Remove a profile
-vpn-edit <name>      # Edit existing profile settings
-```
-
-**Validation before saving:**
-```powershell
-function Test-ProfileComplete {
-    param($Config)
-    return (
-        $Config.Server -and
-        $Config.Port -and
-        $Config.Protocol -and
-        $Config.Username   # credentials must exist
-    )
-}
-# Only save profile if ALL fields are present
-```
-
-### 2. One-Click Settings Change (Priority: Medium) ✅ IMPLEMENTED
-
-**Goal:** Quick toggle/change individual settings without full re-setup.
-
-**Commands:**
-```powershell
-vpn-set server <value>      # Change server
-vpn-set group <value>       # Change group
-vpn-set port <value>        # Change port
-vpn-set protocol <value>    # Change protocol
-vpn-set user <value>        # Change username (re-prompts password)
-vpn-set duo <method>        # Change default DUO method
-```
-
-**Implementation:**
-```powershell
-# vpn-set is a wrapper that modifies config.json in-place
-function vpn-set {
-    param([string]$Key, [string]$Value)
-    $config = Load-Config
-    switch ($Key) {
-        "server"   { $config.Server = $Value }
-        "group"    { $config.Group = $Value }
-        "port"     { $config.Port = $Value }
-        "protocol" { $config.Protocol = $Value }
-        "duo"      { $config.DuoMethod = $Value }
-        "user"     {
-            # Username change requires re-entering password
-            Save-VpnCredentials
-            return
-        }
-    }
-    $config | ConvertTo-Json | Set-Content $ConfigFile
-    Write-Host "[OK] $Key updated to: $Value"
-}
-```
-
-### 3. Connection History & Auto-Reconnect (Priority: Low)
-
-**Goal:** Log connections and auto-reconnect on disconnect.
-
-```powershell
-vpn-history              # Show connection log
-vpn-monitor              # Watch connection, auto-reconnect if dropped
-```
-
-### 4. GUI Tray Application (Priority: Low)
-
-**Goal:** System tray icon with connect/disconnect/status.
-
-- PowerShell-based tray app using Windows Forms
-- Shows connected/disconnected icon
-- Right-click menu: Connect, Disconnect, Status, Settings
-- Auto-start with Windows (optional)
-
 ## Implementation Notes
 
 ### DPAPI Encryption
@@ -306,3 +215,8 @@ vpn-monitor              # Watch connection, auto-reconnect if dropped
 - DKU DUO shows numbered options: `1-Push to X-3808`
 - Script sends `1` for push, `2` for phone, `3` for SMS
 - For TOTP passcode: auto-generates 6-digit code from stored secret
+
+### Bat/Cmd File Encoding
+- All bat/cmd files MUST use ASCII-only `@REM` comments
+- Chinese characters in UTF-8 bat files cause cmd.exe encoding errors
+- `#` is NOT a valid batch comment character — use `@REM`

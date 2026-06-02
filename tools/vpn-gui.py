@@ -461,8 +461,21 @@ class App:
             fields[label] = entry
             return entry
 
-        # Common fields for all presets
-        name_entry = make_field(form_frame, "Name", "dku", row_idx=0)
+        # Name field (only visible for Custom preset)
+        name_frame = tk.Frame(form_frame, bg=C["bg"])
+        name_row = tk.Frame(name_frame, bg=C["bg"])
+        name_row.pack(fill="x", pady=(6, 0))
+        tk.Label(name_row, text="Name", font=("Segoe UI", 9),
+                 bg=C["bg"], fg=C["subtext"], width=10, anchor="w").pack(side="left")
+        name_entry = tk.Entry(name_row, font=("Segoe UI", 10), bg=C["surface"],
+                              fg=C["text"], insertbackground=C["text"],
+                              relief="flat", highlightthickness=1,
+                              highlightbackground=C["muted"])
+        name_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        name_entry.insert(0, "my-vpn")
+        fields["Name"] = name_entry
+
+        # Common fields: NetID, Password
         username_entry = make_field(form_frame, "NetID", "your-netid", row_idx=1)
         password_entry = make_field(form_frame, "Password", "", show="*", row_idx=2)
 
@@ -487,9 +500,13 @@ class App:
 
         def toggle_preset():
             if preset_var.get() == "dku":
+                # DKU: hide Name field and custom fields
+                name_frame.pack_forget()
                 custom_frame.pack_forget()
-                dlg.geometry("420x340")
+                dlg.geometry("420x300")
             else:
+                # Custom: show Name field and custom fields
+                name_frame.pack(fill="x", before=username_entry.master)
                 custom_frame.pack(fill="x", padx=20, pady=(8, 0), after=sep.master)
                 dlg.geometry("420x480")
 
@@ -499,21 +516,25 @@ class App:
 
         # -- Save logic --
         def on_save():
-            name = name_entry.get().strip()
             username = username_entry.get().strip()
             password = password_entry.get().strip()
             group = group_var.get()
 
-            if not name or not username or not password:
-                messagebox.showerror("Error", "Name, NetID, and Password are required.")
+            if not username or not password:
+                messagebox.showerror("Error", "NetID and Password are required.")
                 return
 
             if preset_var.get() == "dku":
-                # DKU preset: everything pre-filled
+                # DKU preset: everything pre-filled, name auto-set
+                name = "dku"
                 server = "portal.dukekunshan.edu.cn"
                 port = "443"
                 protocol = "ssl"
             else:
+                name = name_entry.get().strip()
+                if not name:
+                    messagebox.showerror("Error", "Name is required for custom profile.")
+                    return
                 server = server_entry.get().strip()
                 port = port_entry.get().strip() or "443"
                 protocol = protocol_entry.get().strip() or "ssl"
