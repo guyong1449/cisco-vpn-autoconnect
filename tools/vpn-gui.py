@@ -396,34 +396,60 @@ class App:
         self._log(f"Switched to profile: {name}")
 
     def _add_profile(self):
-        """Interactive add profile dialog."""
+        """Interactive add profile dialog with DKU preset."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Add VPN Profile")
-        dlg.geometry("380x320")
+        dlg.geometry("420x440")
         dlg.configure(bg=C["bg"])
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
 
-        fields = {}
-        labels = [
-            ("Name", "e.g. dku, company, home-lab"),
-            ("Server", "e.g. portal.dukekunshan.edu.cn"),
-            ("Group", "e.g. -Default- (blank to skip)"),
-            ("Port", "443"),
-            ("Protocol", "ssl"),
-            ("Username", ""),
-        ]
+        # -- Preset selector --
+        preset_frame = tk.Frame(dlg, bg=C["bg"])
+        preset_frame.pack(fill="x", padx=20, pady=(16, 0))
 
-        for i, (label, placeholder) in enumerate(labels):
-            row = tk.Frame(dlg, bg=C["bg"])
-            row.pack(fill="x", padx=20, pady=(8 if i == 0 else 2, 0))
+        tk.Label(preset_frame, text="Preset", font=("Segoe UI", 9, "bold"),
+                 bg=C["bg"], fg=C["subtext"]).pack(anchor="w")
+
+        preset_var = tk.StringVar(value="dku")
+        preset_row = tk.Frame(preset_frame, bg=C["bg"])
+        preset_row.pack(fill="x", pady=(4, 0))
+
+        presets = {
+            "dku": "Duke Kunshan VPN",
+            "custom": "Custom / Other",
+        }
+        for val, label in presets.items():
+            rb = tk.Radiobutton(
+                preset_row, text=label, variable=preset_var, value=val,
+                font=("Segoe UI", 9), bg=C["bg"], fg=C["text"],
+                selectcolor=C["overlay"], activebackground=C["bg"],
+                activeforeground=C["blue"], highlightthickness=0
+            )
+            rb.pack(side="left", padx=(0, 16))
+
+        # Separator
+        sep = tk.Frame(dlg, bg=C["muted"], height=1)
+        sep.pack(fill="x", padx=20, pady=(12, 0))
+
+        # -- Form fields --
+        form_frame = tk.Frame(dlg, bg=C["bg"])
+        form_frame.pack(fill="x", padx=20, pady=(8, 0))
+
+        fields = {}
+
+        def make_field(parent, label, placeholder="", show=None, row_idx=0):
+            row = tk.Frame(parent, bg=C["bg"])
+            row.pack(fill="x", pady=(6 if row_idx == 0 else 3, 0))
             tk.Label(row, text=label, font=("Segoe UI", 9),
                      bg=C["bg"], fg=C["subtext"], width=10, anchor="w").pack(side="left")
             entry = tk.Entry(row, font=("Segoe UI", 10), bg=C["surface"],
                              fg=C["text"], insertbackground=C["text"],
                              relief="flat", highlightthickness=1,
                              highlightbackground=C["muted"])
+            if show:
+                entry.config(show=show)
             entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
             if placeholder:
                 entry.insert(0, placeholder)
@@ -433,92 +459,132 @@ class App:
                     ent.config(fg=C["text"])
                 ))
             fields[label] = entry
+            return entry
 
-        # Password field
-        pw_row = tk.Frame(dlg, bg=C["bg"])
-        pw_row.pack(fill="x", padx=20, pady=(2, 0))
-        tk.Label(pw_row, text="Password", font=("Segoe UI", 9),
+        # Common fields for all presets
+        name_entry = make_field(form_frame, "Name", "dku", row_idx=0)
+        username_entry = make_field(form_frame, "NetID", "your-netid", row_idx=1)
+        password_entry = make_field(form_frame, "Password", "", show="*", row_idx=2)
+
+        # Group selector (dropdown instead of free text)
+        group_row = tk.Frame(form_frame, bg=C["bg"])
+        group_row.pack(fill="x", pady=(6, 0))
+        tk.Label(group_row, text="Group", font=("Segoe UI", 9),
                  bg=C["bg"], fg=C["subtext"], width=10, anchor="w").pack(side="left")
-        pw_entry = tk.Entry(pw_row, font=("Segoe UI", 10), bg=C["surface"],
-                            fg=C["text"], insertbackground=C["text"],
-                            relief="flat", show="*", highlightthickness=1,
-                            highlightbackground=C["muted"])
-        pw_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
-        fields["Password"] = pw_entry
+        group_var = tk.StringVar(value="-Default-")
+        group_combo = ttk.Combobox(
+            group_row, textvariable=group_var, font=("Segoe UI", 10),
+            values=["-Default-", "Library Resources Only"], state="readonly"
+        )
+        group_combo.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
+        # -- Custom fields (hidden by default, shown when "Custom" selected) --
+        custom_frame = tk.Frame(dlg, bg=C["bg"])
+
+        server_entry = make_field(custom_frame, "Server", "vpn.example.com", row_idx=0)
+        port_entry = make_field(custom_frame, "Port", "443", row_idx=1)
+        protocol_entry = make_field(custom_frame, "Protocol", "ssl", row_idx=2)
+
+        def toggle_preset():
+            if preset_var.get() == "dku":
+                custom_frame.pack_forget()
+                dlg.geometry("420x340")
+            else:
+                custom_frame.pack(fill="x", padx=20, pady=(8, 0), after=sep.master)
+                dlg.geometry("420x480")
+
+        preset_var.trace_add("write", lambda *_: toggle_preset())
+        # Start with DKU preset (hide custom fields)
+        toggle_preset()
+
+        # -- Save logic --
         def on_save():
-            name = fields["Name"].get().strip()
-            server = fields["Server"].get().strip()
-            group = fields["Group"].get().strip()
-            port = fields["Port"].get().strip() or "443"
-            protocol = fields["Protocol"].get().strip() or "ssl"
-            username = fields["Username"].get().strip()
-            password = fields["Password"].get().strip()
+            name = name_entry.get().strip()
+            username = username_entry.get().strip()
+            password = password_entry.get().strip()
+            group = group_var.get()
 
-            if not name or not server or not username or not password:
-                messagebox.showerror("Error", "Name, Server, Username, and Password are required.")
+            if not name or not username or not password:
+                messagebox.showerror("Error", "Name, NetID, and Password are required.")
                 return
 
-            # Create profile directory
-            profile_dir = PROFILES_DIR / name
-            profile_dir.mkdir(parents=True, exist_ok=True)
+            if preset_var.get() == "dku":
+                # DKU preset: everything pre-filled
+                server = "portal.dukekunshan.edu.cn"
+                port = "443"
+                protocol = "ssl"
+            else:
+                server = server_entry.get().strip()
+                port = port_entry.get().strip() or "443"
+                protocol = protocol_entry.get().strip() or "ssl"
+                if not server:
+                    messagebox.showerror("Error", "Server is required for custom profile.")
+                    return
 
-            # Save config
-            cfg = {"Server": server, "Group": group, "Port": port, "Protocol": protocol}
-            (profile_dir / "config.json").write_text(json.dumps(cfg, indent=2))
-
-            # Save credentials (call PowerShell to encrypt with DPAPI)
-            ps_cmd = (
-                f'Add-Type -AssemblyName System.Security; '
-                f'$bytes = [System.Text.Encoding]::UTF8.GetBytes("{password}"); '
-                f'$enc = [System.Security.Cryptography.ProtectedData]::Protect('
-                f'$bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser); '
-                f'@{{Server="{server}"; Username="{username}"; Password=[Convert]::ToBase64String($enc)}} '
-                f'| ConvertTo-Json'
-            )
-            try:
-                result = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", ps_cmd],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode == 0:
-                    (profile_dir / "credentials.xml").write_text(result.stdout.strip())
-                else:
-                    # Fallback: save as base64 (less secure)
-                    import base64
-                    cred = {
-                        "Server": server,
-                        "Username": username,
-                        "Password": base64.b64encode(password.encode()).decode()
-                    }
-                    (profile_dir / "credentials.xml").write_text(json.dumps(cred, indent=2))
-            except Exception:
-                import base64
-                cred = {
-                    "Server": server,
-                    "Username": username,
-                    "Password": base64.b64encode(password.encode()).decode()
-                }
-                (profile_dir / "credentials.xml").write_text(json.dumps(cred, indent=2))
-
-            # Update index
-            index = self._load_profiles()
-            if name not in index:
-                index.append(name)
-                PROFILES_INDEX.write_text(json.dumps(index, indent=2))
-
-            self._save_active_profile(name)
-            self._current_profile = name
-            self._refresh_profiles()
-            self._log(f"Profile '{name}' added: {server}")
+            self._save_profile(name, server, group, port, protocol, username, password)
             dlg.destroy()
 
+        # -- Buttons --
         btn_row = tk.Frame(dlg, bg=C["bg"])
         btn_row.pack(fill="x", padx=20, pady=(16, 0))
         FlatButton(btn_row, "[ Save ]", on_save,
                    bg=C["green"], fg=C["crust"]).pack(side="left")
         FlatButton(btn_row, "[ Cancel ]", dlg.destroy,
                    bg=C["overlay"], fg=C["text"]).pack(side="left", padx=(8, 0))
+
+    def _save_profile(self, name, server, group, port, protocol, username, password):
+        """Save a profile to disk with DPAPI-encrypted credentials."""
+        profile_dir = PROFILES_DIR / name
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save config
+        cfg = {"Server": server, "Group": group, "Port": port, "Protocol": protocol}
+        (profile_dir / "config.json").write_text(json.dumps(cfg, indent=2))
+
+        # Save credentials (call PowerShell to encrypt with DPAPI)
+        # Escape quotes in password for PowerShell
+        safe_pw = password.replace('"', '`"')
+        ps_cmd = (
+            f'Add-Type -AssemblyName System.Security; '
+            f'$bytes = [System.Text.Encoding]::UTF8.GetBytes("{safe_pw}"); '
+            f'$enc = [System.Security.Cryptography.ProtectedData]::Protect('
+            f'$bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser); '
+            f'@{{Server="{server}"; Username="{username}"; Password=[Convert]::ToBase64String($enc)}} '
+            f'| ConvertTo-Json'
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                (profile_dir / "credentials.xml").write_text(result.stdout.strip())
+            else:
+                self._save_cred_fallback(profile_dir, server, username, password)
+        except Exception:
+            self._save_cred_fallback(profile_dir, server, username, password)
+
+        # Update index
+        index = self._load_profiles()
+        if name not in index:
+            index.append(name)
+            PROFILES_INDEX.write_text(json.dumps(index, indent=2))
+
+        self._save_active_profile(name)
+        self._current_profile = name
+        self._refresh_profiles()
+        self._log(f"Profile '{name}' added: {username}@{server}")
+
+    @staticmethod
+    def _save_cred_fallback(profile_dir, server, username, password):
+        """Fallback: save credentials as base64 (less secure than DPAPI)."""
+        import base64
+        cred = {
+            "Server": server,
+            "Username": username,
+            "Password": base64.b64encode(password.encode()).decode()
+        }
+        (profile_dir / "credentials.xml").write_text(json.dumps(cred, indent=2))
 
     def _remove_profile(self):
         name = self.profile_var.get()
