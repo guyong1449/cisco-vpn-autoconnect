@@ -1,5 +1,6 @@
 @echo off
-@REM vpn-add: Add a new VPN profile
-@REM Usage: vpn-add
-@REM   Prompts for: name, server, group, port, protocol, username, password
+@REM vpn-add: Deprecated - use 'vpn-config add' instead
+@REM This command redirects to vpn-config add for unified config
+echo [!] vpn-add is deprecated. Use 'vpn-config add' instead.
+echo.
 powershell -ExecutionPolicy Bypass -File "%~dp0..\vpn-auto-connect.ps1" -Add

@@ -1,5 +1,6 @@
 @echo off
-@REM vpn-totp: Save DUO TOTP secret for fully automatic login
-@REM Usage: vpn-totp
-@REM Get secret: use 'qrgui' to decode DUO QR code, copy the Secret field
+@REM vpn-totp: Deprecated - use 'vpn-config totp' instead
+@REM This command redirects to vpn-config totp for unified config
+echo [!] vpn-totp is deprecated. Use 'vpn-config totp' instead.
+echo.
 powershell -ExecutionPolicy Bypass -File "%~dp0..\vpn-auto-connect.ps1" -SaveTOTP

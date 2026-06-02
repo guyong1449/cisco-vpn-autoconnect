@@ -1,5 +1,6 @@
 @echo off
-@REM vpn-setup: Save or update VPN credentials (legacy single-config)
-@REM Usage: vpn-setup
-@REM Tip: prefer 'vpn-add' for multi-profile support
-powershell -ExecutionPolicy Bypass -File "%~dp0..\vpn-auto-connect.ps1" -SaveCredentials
+@REM vpn-setup: Deprecated - use 'vpn-config add' instead
+@REM This command redirects to vpn-config add for multi-profile support
+echo [!] vpn-setup is deprecated. Use 'vpn-config add' instead.
+echo.
+powershell -ExecutionPolicy Bypass -File "%~dp0..\vpn-auto-connect.ps1" -Add

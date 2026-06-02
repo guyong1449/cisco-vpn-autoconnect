@@ -141,9 +141,8 @@ def connect_vpn(duo_method: str = "push"):
         duo_input = generate_totp(secret)
         print(f"[>>] TOTP code: {duo_input}")
     else:
-        duo_input = duo_method
-        if duo_method == "push":
-            print("[>>] Please tap 'Approve' on your DUO mobile push")
+        duo_map = {"push": "1", "phone": "2", "sms": "3"}
+        duo_input = duo_map.get(duo_method, "1")
 
     # Close GUI client if running (it blocks vpncli)
     import subprocess
@@ -187,6 +186,8 @@ def connect_vpn(duo_method: str = "push"):
         ]
         child.expect("|".join(duo_prompts), timeout=15)
         child.sendline(duo_input)
+        if duo_method == "push":
+            print("[>>] Please tap 'Approve' on your DUO mobile push")
 
         # Accept certificate (if prompted)
         try:

@@ -31,6 +31,7 @@
 # -Set <key> -SetValue <v> 修改单个设置 / Change single setting (server/group/port/protocol/user/duo)
 # ============================================================
 
+[CmdletBinding()]
 param(
     [string]$VpnServer,
     [string]$VpnGroup,
@@ -52,7 +53,11 @@ param(
     [string]$Edit,
     # One-click settings
     [string]$Set,
-    [string]$SetValue
+    [string]$SetValue,
+    [switch]$Config,
+    [switch]$Brief,
+    [switch]$Reset,
+    [switch]$LoadFunctionsOnly
 )
 
 # ============================================================
@@ -140,6 +145,25 @@ function Get-ProfileDir {
     return "$ProfilesDir\$Name"
 }
 
+function Migrate-LegacyConfigIfNeeded {
+    # One-time migration: move legacy root files into profiles/default
+    $index = Get-ProfilesIndex
+    $hasLegacy = (Test-Path $ConfigFile) -or (Test-Path $CredFile)
+    if ($index.Count -gt 0 -or -not $hasLegacy) { return }
+
+    Write-Host "[..] Migrating legacy config to profiles/default..." -ForegroundColor Yellow
+    $profileDir = Get-ProfileDir "default"
+    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+
+    if (Test-Path $ConfigFile) { Copy-Item $ConfigFile "$profileDir\config.json" -Force }
+    if (Test-Path $CredFile)  { Copy-Item $CredFile  "$profileDir\credentials.xml" -Force }
+    if (Test-Path $TotpFile)  { Copy-Item $TotpFile  "$profileDir\totp.xml" -Force }
+
+    Save-ProfilesIndex @("default")
+    Set-ActiveProfile "default"
+    Write-Host "[OK] Migrated to profile 'default'" -ForegroundColor Green
+}
+
 function Add-VpnProfile {
     Write-Host ""
     Write-Host "=== Add New VPN Profile ===" -ForegroundColor Yellow
@@ -152,7 +176,7 @@ function Add-VpnProfile {
     # Check if profile already exists
     $existing = Get-ProfilesIndex
     if ($existing -contains $name) {
-        Write-Host "[!!] Profile '$name' already exists. Use vpn-edit to modify." -ForegroundColor Red
+        Write-Host "[!!] Profile '$name' already exists. Use 'vpn-config set' to modify." -ForegroundColor Red
         return
     }
 
@@ -220,7 +244,7 @@ function Add-VpnProfile {
 
     Write-Host "[OK] Profile '$name' created" -ForegroundColor Green
     Write-Host "     Server: $server" -ForegroundColor Gray
-    Write-Host "     Use: vpn-use $name" -ForegroundColor Gray
+    Write-Host "     Use: vpn-config use $name" -ForegroundColor Gray
 }
 
 function Use-VpnProfile {
@@ -238,30 +262,108 @@ function Use-VpnProfile {
     Write-Host "[OK] Active profile: $Name" -ForegroundColor Green
 }
 
-function List-VpnProfiles {
+function Show-Config {
+    param([switch]$Brief)
+
     $index = Get-ProfilesIndex
     $active = Get-ActiveProfile
 
-    if ($index.Count -eq 0) {
-        Write-Host "[*] No profiles configured. Run: vpn-add" -ForegroundColor Yellow
+    if ($Brief) {
+        # Compact profile list (replaces vpn-ls)
+        if ($index.Count -eq 0) {
+            Write-Host "[!!] No profiles configured. Run: vpn-config add" -ForegroundColor Yellow
+            return
+        }
+        Write-Host ""
+        Write-Host "VPN Profiles:" -ForegroundColor Cyan
+        Write-Host "-------------------------------------------" -ForegroundColor DarkGray
+        foreach ($name in $index) {
+            $marker = if ($name -eq $active) { " *" } else { "  " }
+            $profileDir = Get-ProfileDir $name
+            $config = $null
+            if (Test-Path "$profileDir\config.json") {
+                $config = Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
+            }
+            $serverInfo = if ($config) { "$($config.Server):$($config.Port)" } else { "(incomplete)" }
+            $color = if ($name -eq $active) { "Green" } else { "Gray" }
+            Write-Host "$marker$name" -NoNewline -ForegroundColor $color
+            Write-Host "  $serverInfo" -ForegroundColor DarkGray
+        }
+        Write-Host "-------------------------------------------" -ForegroundColor DarkGray
+        Write-Host "  * = active profile" -ForegroundColor Gray
+        Write-Host ""
         return
     }
 
     Write-Host ""
-    Write-Host "VPN Profiles:" -ForegroundColor Cyan
+    Write-Host "=== VPN Configuration ===" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Active profile
+    if ($active) {
+        Write-Host "Active Profile: $active" -ForegroundColor Green
+    } else {
+        Write-Host "Active Profile: (none)" -ForegroundColor Yellow
+    }
+
+    # TOTP status (check profile first, then global)
+    $hasTotp = $false
+    if ($active) { $hasTotp = Test-Path "$(Get-ProfileDir $active)\totp.xml" }
+    if (-not $hasTotp) { $hasTotp = Test-Path $TotpFile }
+    $totpStatus = if ($hasTotp) { "saved" } else { "not set" }
+    Write-Host "TOTP Secret:    $totpStatus" -ForegroundColor $(if ($hasTotp) { "Green" } else { "Yellow" })
+
+    Write-Host ""
+
+    # Profiles
+    if ($index.Count -eq 0) {
+        Write-Host "[!!] No profiles configured. Run: vpn-config add" -ForegroundColor Yellow
+        Write-Host ""
+        return
+    }
+
+    Write-Host "Profiles ($($index.Count)):" -ForegroundColor Cyan
     Write-Host "-------------------------------------------" -ForegroundColor DarkGray
+
     foreach ($name in $index) {
         $marker = if ($name -eq $active) { " *" } else { "  " }
+        $color = if ($name -eq $active) { "Green" } else { "White" }
+        Write-Host "$marker$name" -ForegroundColor $color
+
         $profileDir = Get-ProfileDir $name
-        $config = $null
+
+        # Config
         if (Test-Path "$profileDir\config.json") {
-            $config = Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
+            $cfg = Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
+            Write-Host "    Server:   $($cfg.Server)" -ForegroundColor Gray
+            Write-Host "    Port:     $($cfg.Port)" -ForegroundColor Gray
+            Write-Host "    Protocol: $($cfg.Protocol)" -ForegroundColor Gray
+            Write-Host "    Group:    $($cfg.Group)" -ForegroundColor Gray
+        } else {
+            Write-Host "    (no config)" -ForegroundColor DarkGray
         }
-        $serverInfo = if ($config) { "$($config.Server):$($config.Port)" } else { "(incomplete)" }
-        $color = if ($name -eq $active) { "Green" } else { "Gray" }
-        Write-Host "$marker$name" -NoNewline -ForegroundColor $color
-        Write-Host "  $serverInfo" -ForegroundColor DarkGray
+
+        # Credentials
+        if (Test-Path "$profileDir\credentials.xml") {
+            try {
+                $credData = Get-Content "$profileDir\credentials.xml" -Raw | ConvertFrom-Json
+                Write-Host "    NetID:    $($credData.Username)" -ForegroundColor Gray
+                Write-Host "    Password: (saved)" -ForegroundColor Gray
+            } catch {
+                Write-Host "    Credentials: (read error)" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "    Credentials: (none)" -ForegroundColor DarkGray
+        }
+
+        # Per-profile TOTP
+        if (Test-Path "$profileDir\totp.xml") {
+            Write-Host "    TOTP:     (saved)" -ForegroundColor Gray
+        }
+
+        Write-Host ""
     }
+
     Write-Host "-------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  * = active profile" -ForegroundColor Gray
     Write-Host ""
@@ -379,7 +481,7 @@ function Set-VpnSetting {
     }
 
     if (-not (Test-Path $configFile)) {
-        Write-Host "[!!] No config found. Run vpn-setup or vpn-add first." -ForegroundColor Red
+        Write-Host "[!!] No config found. Run 'vpn-config add' or 'vpn-config reset-all' first." -ForegroundColor Red
         return
     }
 
@@ -563,8 +665,17 @@ function Save-TOTPSecret {
 }
 
 function Get-TOTPCode {
-    if (-not (Test-Path $TotpFile)) { return $null }
-    $data = Get-Content $TotpFile -Raw | ConvertFrom-Json
+    # Read TOTP from active profile first, fall back to global
+    $active = Get-ActiveProfile
+    $totpPath = $null
+    if ($active) {
+        $profileTotp = "$(Get-ProfileDir $active)\totp.xml"
+        if (Test-Path $profileTotp) { $totpPath = $profileTotp }
+    }
+    if (-not $totpPath -and (Test-Path $TotpFile)) { $totpPath = $TotpFile }
+    if (-not $totpPath) { return $null }
+
+    $data = Get-Content $totpPath -Raw | ConvertFrom-Json
     $secret = (Decrypt-String $data.Secret)
 
     # Compute TOTP (RFC 6238)
@@ -605,6 +716,123 @@ function Get-TOTPCode {
 # VPN 操作 / VPN Operations
 # ============================================================
 
+# Processes that must not hold the VPN lock before vpncli connect (never kill vpnagent).
+$script:CiscoVpnKillNames = @('csc_ui', 'vpnui', 'vpncli')
+
+function Get-CiscoVpnBlockerProcesses {
+    $ciscoDir = Split-Path $VpnCliPath -Parent
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($p in Get-Process -ErrorAction SilentlyContinue) {
+        if ($p.Name -eq 'vpnagent') { continue }
+        if ($script:CiscoVpnKillNames -contains $p.Name) {
+            $list.Add($p) | Out-Null
+            continue
+        }
+        try {
+            if ($p.Path -and $p.Path.StartsWith($ciscoDir, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($p.Name -ne 'vpnagent') { $list.Add($p) | Out-Null }
+            }
+        } catch { }
+    }
+    return $list
+}
+
+function Write-CiscoVpnBlockerReport {
+    $blockers = Get-CiscoVpnBlockerProcesses
+    if ($blockers.Count -eq 0) {
+        Write-Host "[*] No GUI/vpncli blockers (vpnagent may still be running; that is OK)" -ForegroundColor Gray
+        return
+    }
+    Write-Host "[*] Processes that block CLI connect (close these first):" -ForegroundColor Yellow
+    foreach ($p in $blockers) {
+        $path = try { $p.Path } catch { "" }
+        $parentHint = ""
+        try {
+            $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -ErrorAction Stop
+            $parent = Get-Process -Id $wmi.ParentProcessId -ErrorAction SilentlyContinue
+            if ($parent) { $parentHint = "  parent: $($parent.ProcessName) (PID $($parent.Id))" }
+        } catch { }
+        Write-Host "     $($p.Name) (PID $($p.Id))$parentHint" -ForegroundColor Gray
+        if ($path) { Write-Host "       $path" -ForegroundColor DarkGray }
+    }
+}
+
+function Invoke-VpnCliDisconnectQuiet {
+    # Do not use "disconnect | vpncli -s" — that spawns a vpncli that often stays running.
+    if (-not (Test-Path $VpnCliPath)) { return }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $VpnCliPath
+    $psi.Arguments = "-s"
+    $psi.RedirectStandardInput = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = $null
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        Start-Sleep -Seconds 2
+        $proc.StandardInput.WriteLine("disconnect")
+        $proc.StandardInput.WriteLine("exit")
+        $proc.StandardInput.Flush()
+        if (-not $proc.WaitForExit(5000)) { $proc.Kill() }
+    } catch {
+        if ($proc -and -not $proc.HasExited) { $proc.Kill() }
+    }
+}
+
+# Cisco GUI or another vpncli holds the VPN subsystem; CLI connect fails until they are closed.
+function Stop-CiscoClientBlockers {
+    $blockers = Get-CiscoVpnBlockerProcesses
+    if ($blockers.Count -eq 0) {
+        return $true
+    }
+
+    Write-Host "[..] Closing Cisco GUI / vpncli (required for CLI)..." -ForegroundColor Yellow
+    Write-CiscoVpnBlockerReport
+
+    $ciscoDir = Split-Path $VpnCliPath -Parent
+    for ($round = 0; $round -lt 3; $round++) {
+        foreach ($name in $script:CiscoVpnKillNames) {
+            & taskkill.exe /IM "$name.exe" /F /T 2>$null | Out-Null
+        }
+        foreach ($p in Get-Process -Name 'vpncli','csc_ui','vpnui' -ErrorAction SilentlyContinue) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($p in Get-Process -ErrorAction SilentlyContinue) {
+            if ($p.Name -eq 'vpnagent') { continue }
+            try {
+                if ($p.Path -and $p.Path.StartsWith($ciscoDir, [StringComparison]::OrdinalIgnoreCase)) {
+                    if ($script:CiscoVpnKillNames -contains $p.Name) {
+                        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch { }
+        }
+        Start-Sleep -Seconds 2
+        if (-not (Get-Process -Name 'vpncli','csc_ui','vpnui' -ErrorAction SilentlyContinue)) { break }
+    }
+
+  # Final sweep (do not spawn vpncli here — that leaves a blocker process)
+    & taskkill.exe /IM vpncli.exe /F /T 2>$null | Out-Null
+    Start-Sleep -Seconds 1
+
+    $still = Get-CiscoVpnBlockerProcesses
+    if ($still.Count -gt 0) {
+        Write-Host "[!!] Cisco Secure Client is still using the VPN." -ForegroundColor Red
+        Write-CiscoVpnBlockerReport
+        foreach ($p in $still) {
+            try {
+                $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -ErrorAction Stop
+                if ($wmi.ParentProcessId -ne $PID) {
+                    Write-Host "     Close parent window or run: Stop-Process -Id $($wmi.ParentProcessId) -Force" -ForegroundColor Yellow
+                }
+            } catch { }
+        }
+        Write-Host "     Right-click the Cisco icon in the system tray -> Quit / Exit." -ForegroundColor Red
+        return $false
+    }
+    return $true
+}
+
 # vpn-status: 检查 10.x.x.x IP 判断是否已连接 / Check 10.x.x.x IP to detect VPN connection
 function Get-VpnStatus {
     # Check by network interface (more reliable than vpncli status)
@@ -619,14 +847,395 @@ function Get-VpnStatus {
         Write-Host "[!!] VPN not connected" -ForegroundColor Red
     }
 
-    # Also show Cisco client status
-    $processes = Get-Process -Name "vpncli","vpnui","csc_ui" -ErrorAction SilentlyContinue
-    if ($processes) {
-        Write-Host "[*] Cisco Secure Client is running" -ForegroundColor Gray
+    Write-Host ""
+    Write-CiscoVpnBlockerReport
+}
+
+# vpn-connect helpers: prompt-driven vpncli session (reads stdout, responds to prompts)
+function Get-VpnGroupSelection {
+    param($Config)
+    if ($Config.Group -eq "Library Resources Only") { return "1" }
+    # Timed mode: numbered menu usually expects index; -Default- -> 0
+    if ($Config.Group -eq "-Default-" -or [string]::IsNullOrWhiteSpace($Config.Group)) { return "0" }
+    if ($Config.Group) { return [string]$Config.Group }
+    return "0"
+}
+
+function Get-DuoCliInput {
+    param([string]$EffectiveDuo, [string]$TotpCode)
+    switch ($EffectiveDuo) {
+        "phone" { return "2" }
+        "sms" { return "3" }
+        "passcode" { return $TotpCode }
+        default { return "1" }
     }
 }
 
-# vpn-connect: 自动连接 VPN (6 步交互) / Auto-connect VPN (6-step vpncli interaction)
+function Test-VpnConnectedByIp {
+    $vpnAdapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } |
+        Get-NetIPAddress -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -match "^10\." }
+    return [bool]$vpnAdapter
+}
+
+function Get-VpnCliBufferText {
+    param([System.Text.StringBuilder]$Buffer, $SyncRoot)
+    [System.Threading.Monitor]::Enter($SyncRoot)
+    try { return $Buffer.ToString() } finally { [System.Threading.Monitor]::Exit($SyncRoot) }
+}
+
+function Write-VpnCliTail {
+    param([string]$Output, [switch]$Force)
+    if (-not $Output) { return }
+    if (-not $Force -and ($VerbosePreference -eq 'Continue' -or $env:VPN_DEBUG -eq '1')) { return }
+    Write-Host "--- vpncli output ---" -ForegroundColor DarkGray
+    Write-Host $Output -ForegroundColor DarkGray
+}
+
+function Test-VpnCliAuthFailed {
+    param([string]$Text)
+    if ($Text -match '答：\s*\n\s*>>\s*登录失败') {
+        return $true
+    }
+    return $Text -match '登录失败|Login denied|Authentication failed|[Aa]ccess denied|invalid credentials'
+}
+
+function Wait-ForVpnPrompt {
+    param(
+        [System.Text.StringBuilder]$Buffer,
+        $SyncRoot,
+        [string]$Pattern,
+        [int]$TimeoutSeconds = 30,
+        [switch]$Optional
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $text = Get-VpnCliBufferText -Buffer $Buffer -SyncRoot $SyncRoot
+        if ($text -match $Pattern) { return $true }
+        Start-Sleep -Milliseconds 200
+    }
+    if ($Optional) { return $false }
+    Write-Host "[!!] Timeout waiting for vpncli prompt (pattern: $Pattern)" -ForegroundColor Red
+    if ($text) { Write-Host $text -ForegroundColor DarkGray }
+    return $false
+}
+
+function Send-VpnCliLine {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$Line,
+        $Session = $null,
+        [string]$StepLabel = ""
+    )
+    if ($Process.HasExited) {
+        $tail = ""
+        if ($Session -and $Session.Buffer) { $tail = $Session.Buffer.ToString() }
+        $label = if ($StepLabel) { " ($StepLabel)" } else { "" }
+        throw "vpncli exited before stdin write$label (exit $($Process.ExitCode)).`n$tail"
+    }
+    try {
+        $Process.StandardInput.WriteLine($Line)
+        $Process.StandardInput.Flush()
+    } catch {
+        $tail = ""
+        if ($Session -and $Session.Buffer) { $tail = $Session.Buffer.ToString() }
+        $stepSuffix = if ($StepLabel) { " ($StepLabel)" } else { "" }
+        throw "stdin write failed${stepSuffix}: $_`n$tail"
+    }
+}
+
+function Send-VpnCliLineIfAlive {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$Line,
+        $Session = $null,
+        [string]$StepLabel = ""
+    )
+    if ($Process.HasExited) { return $false }
+    try {
+        Send-VpnCliLine -Process $Process -Line $Line -Session $Session -StepLabel $StepLabel
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# vpncli on Windows: stdout often only drains when read synchronously on the main thread (not background ReadLine).
+function Get-VpnSessionText {
+    param($Session)
+    if ($Session.Sync) {
+        return Get-VpnCliBufferText -Buffer $Session.Buffer -SyncRoot $Session.Sync
+    }
+    return $Session.Buffer.ToString()
+}
+
+# Non-blocking read: ReadLine() blocks when vpncli waits for stdin at a prompt (e.g. group menu).
+function Drain-VpnCliOutput {
+    param(
+        $Session,
+        [int]$MaxSeconds = 1
+    )
+    $proc = $Session.Process
+    if (-not $proc -or -not $proc.StandardOutput) { return }
+    $buf = $Session.Buffer
+    $echo = $Session.ShowOutput
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
+        $readAny = $false
+        foreach ($stream in @($proc.StandardOutput, $proc.StandardError)) {
+            if (-not $stream) { continue }
+            try {
+                while ($stream.Peek() -ge 0) {
+                    $line = $stream.ReadLine()
+                    if ($null -eq $line) { break }
+                    [void]$buf.AppendLine($line)
+                    if ($echo) { Write-Host "   | $line" -ForegroundColor DarkGray }
+                    $readAny = $true
+                }
+            } catch { break }
+        }
+        if ($proc.HasExited -and -not $readAny) { break }
+        if (-not $readAny) { Start-Sleep -Milliseconds 50 }
+    }
+}
+
+function New-VpnCliSession {
+    param([string]$CliPath, [bool]$ShowOutput)
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $CliPath
+    $psi.Arguments = "-s"
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    return @{
+        Process    = $proc
+        Buffer     = (New-Object System.Text.StringBuilder)
+        ShowOutput = $ShowOutput
+        Tasks      = @()
+    }
+}
+
+# Prompt-driven path disabled: vpncli does not write to redirected pipes on Windows.
+# function Test-VpnCliBufferHasOutput { ... }
+
+function Write-VpnConnectResult {
+    param(
+        [bool]$Connected,
+        [string]$Output,
+        [bool]$ShowCliOutput
+    )
+    if (-not $ShowCliOutput -and $Output) {
+        Write-Host $Output -ForegroundColor DarkGray
+    }
+    $vpnAdapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } |
+        Get-NetIPAddress -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -match "^10\." }
+
+    if ($vpnAdapter) {
+        Write-Host "[OK] VPN connected (IP: $($vpnAdapter.IPAddress))" -ForegroundColor Green
+        return $true
+    }
+    if ($Connected -or ($Output -match 'Connected')) {
+        Write-Host "[OK] VPN connected" -ForegroundColor Green
+        return $true
+    }
+    if ($Output -match 'Login denied|Authentication failed|[Aa]ccess denied|登录失败|failed|ʧ') {
+        Write-Host "[!!] Authentication failed" -ForegroundColor Red
+        return $false
+    }
+    Write-Host "[??] Check output above (no 10.x IP detected)" -ForegroundColor Yellow
+    return $false
+}
+
+function Wait-VpnStepOrDelay {
+    param(
+        $Session,
+        [string]$Pattern,
+        [int]$MaxSeconds,
+        [switch]$WatchAuthFailure
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
+        Drain-VpnCliOutput -Session $Session -MaxSeconds 1
+        $text = Get-VpnSessionText -Session $Session
+        if ($WatchAuthFailure -and (Test-VpnCliAuthFailed -Text $text)) { return 'auth-failed' }
+        if ($text -match $Pattern) { return 'ok' }
+        if ($Session.Process -and $Session.Process.HasExited) { return 'exited' }
+        Start-Sleep -Milliseconds 200
+    }
+    Drain-VpnCliOutput -Session $Session -MaxSeconds 1
+    return 'timeout'
+}
+
+# Read stdout only AFTER all stdin sent (reading during vpncli prompts blocks on Windows).
+function Read-VpnCliOutputFinal {
+    param(
+        $Session,
+        [int]$MaxSeconds = 15
+    )
+    $proc = $Session.Process
+    if (-not $proc -or -not $proc.StandardOutput) { return }
+    $buf = $Session.Buffer
+    $echo = $Session.ShowOutput
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
+        if (-not $proc.StandardOutput.EndOfStream) {
+            $ch = $proc.StandardOutput.Read()
+            if ($ch -ge 0) {
+                $c = [char]$ch
+                [void]$buf.Append($c)
+                if ($echo) { Write-Host -NoNewline $c }
+            }
+        } else {
+            Start-Sleep -Milliseconds 300
+            if ($proc.HasExited) { break }
+        }
+    }
+    if ($echo) { Write-Host "" }
+}
+
+function Complete-VpnConnectTimed {
+    param(
+        $Session,
+        [bool]$Connected,
+        [bool]$ShowCliOutput,
+        [int]$ReadSeconds = 15
+    )
+    Read-VpnCliOutputFinal -Session $Session -MaxSeconds $ReadSeconds
+    $output = Get-VpnSessionText -Session $Session
+    if (Test-VpnCliAuthFailed -Text $output) {
+        if ($output -match '答：\s*\r?\n\s*>>\s*登录失败|MFA option field') {
+            Write-Host "[!!] DUO/MFA input missed (empty answer). Retry vpn-connect and approve push promptly." -ForegroundColor Red
+        } else {
+            Write-Host "[!!] Login failed. Update credentials: vpn-config set user <netid>" -ForegroundColor Red
+        }
+        Write-VpnCliTail -Output $output -Force
+        return @{ Connected = $false; CertAccepted = $false; AuthFailed = $true }
+    }
+    if (Test-VpnConnectedByIp) { $Connected = $true }
+    $Connected = Write-VpnConnectResult -Connected $Connected -Output $output -ShowCliOutput $ShowCliOutput
+    if (-not $Connected) { Write-VpnCliTail -Output $output -Force }
+    return @{ Connected = $Connected; CertAccepted = $true; AuthFailed = $false }
+}
+
+# Timed stdin only between steps; collect vpncli text once at the end (initial-release pattern).
+function Invoke-VpnConnectTimed {
+    param(
+        $Session,
+        [string]$ConnectAddr,
+        $Cred,
+        $Config,
+        [string]$DuoInput,
+        [string]$EffectiveDuo,
+        [bool]$ShowCliOutput
+    )
+    $proc = $Session.Process
+    $connected = $false
+
+    # Fixed delays between stdin writes (vpncli on Windows does not expose prompts on stdout).
+    # MFA uses wait + optional retry instead of one long sleep — faster when server is quick, still reliable when slow.
+    Start-Sleep -Seconds 2
+
+    Write-Host "[1/6] Connecting to $ConnectAddr..." -ForegroundColor Gray
+    Send-VpnCliLine -Process $proc -Line "connect $ConnectAddr" -Session $Session -StepLabel 'connect'
+    Start-Sleep -Seconds 5
+
+    $groupSel = Get-VpnGroupSelection -Config $Config
+    Write-Host "[2/6] Selecting group ($groupSel)..." -ForegroundColor Gray
+    Send-VpnCliLine -Process $proc -Line $groupSel -Session $Session -StepLabel 'group'
+    Start-Sleep -Seconds 2
+
+    Write-Host "[3/6] Sending username ($($Cred.Username))..." -ForegroundColor Gray
+    Send-VpnCliLine -Process $proc -Line $Cred.Username -Session $Session -StepLabel 'username'
+    Start-Sleep -Seconds 2
+
+    Write-Host "[4/6] Sending password..." -ForegroundColor Gray
+    Send-VpnCliLine -Process $proc -Line $Cred.Password -Session $Session -StepLabel 'password'
+    Start-Sleep -Seconds 6
+
+    if ($proc.HasExited) {
+        Read-VpnCliOutputFinal -Session $Session -MaxSeconds 8
+        $outputAfterPwd = Get-VpnSessionText -Session $Session
+        Write-Host "[!!] vpncli exited after password (exit $($proc.ExitCode))." -ForegroundColor Red
+        Write-VpnCliTail -Output $outputAfterPwd -Force
+        return @{ Connected = $false; CertAccepted = $false; AuthFailed = $true }
+    }
+
+    Write-Host "[5/6] Waiting for MFA prompt..." -ForegroundColor Gray
+    Start-Sleep -Seconds 8
+
+    Write-Host "[5/6] Sending DUO option ($DuoInput)..." -ForegroundColor Gray
+    Send-VpnCliLine -Process $proc -Line $DuoInput -Session $Session -StepLabel 'duo'
+
+    if ($EffectiveDuo -eq "push") {
+        Write-Host "[>>] Please tap 'Approve' on your DUO mobile push" -ForegroundColor Yellow
+    }
+    $bannerSent = $false
+    $duoRetried = $false
+    if ($EffectiveDuo -ne "passcode") {
+        Write-Host "[>>] Waiting for DUO approval (up to 90s)..." -ForegroundColor Yellow
+        $waitSw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($waitSw.Elapsed.TotalSeconds -lt 90) {
+            if (Test-VpnConnectedByIp) { $connected = $true; break }
+            if ($proc.HasExited) { break }
+            # Retry DUO once if server was slow showing MFA (avoids empty 答： without a 22s fixed wait).
+            if (-not $duoRetried -and $waitSw.Elapsed.TotalSeconds -ge 10) {
+                if (Send-VpnCliLineIfAlive -Process $proc -Line $DuoInput -Session $Session -StepLabel 'duo-retry') {
+                    $duoRetried = $true
+                }
+            }
+            # Banner/cert after DUO approval — not during MFA entry.
+            if (-not $bannerSent -and $waitSw.Elapsed.TotalSeconds -ge 20) {
+                if (Send-VpnCliLineIfAlive -Process $proc -Line "y" -Session $Session -StepLabel 'banner') {
+                    $bannerSent = $true
+                }
+            }
+            Start-Sleep -Milliseconds 300
+        }
+    } else {
+        Start-Sleep -Seconds 3
+    }
+
+    if ($connected -or (Test-VpnConnectedByIp)) {
+        return Complete-VpnConnectTimed -Session $Session -Connected $true -ShowCliOutput $ShowCliOutput -ReadSeconds 6
+    }
+
+    if ($proc.HasExited) {
+        return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 8
+    }
+
+    Write-Host "[6/6] Accepting certificate (if prompted)..." -ForegroundColor Gray
+    [void](Send-VpnCliLineIfAlive -Process $proc -Line "y" -Session $Session -StepLabel 'certificate')
+    Start-Sleep -Seconds 2
+
+    return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 8
+}
+
+# Invoke-VpnConnectPrompted removed: vpncli does not expose prompts on redirected stdout (Windows).
+
+function Stop-VpnCliSession {
+    param($Session, [bool]$Connected)
+    $proc = $Session.Process
+    if (-not $proc -or $proc.HasExited) { return }
+    try {
+        if ($Connected) {
+            try { Send-VpnCliLine -Process $proc -Line "exit" -Session $Session -StepLabel 'exit' } catch { }
+            if (-not $proc.WaitForExit(3000)) { $proc.Kill() }
+        } else {
+            $proc.Kill()
+        }
+    } catch { }
+    finally {
+        try { $proc.Dispose() } catch { }
+    }
+}
+
+# vpn-connect: 自动连接 VPN (6 步交互) / Auto-connect VPN (prompt-driven vpncli interaction)
 # 1. 连接服务器  2. 选择分组  3. 发送用户名  4. 发送密码  5. DUO 验证  6. 接受证书
 function Connect-Vpn {
     # 优先使用活跃 Profile，回退到旧版配置 / Try active profile first, fall back to legacy config
@@ -638,139 +1247,82 @@ function Connect-Vpn {
     if (-not $config) { $config = Load-Config }
     $server = $cred.Server
 
-    # Close GUI client if running (it blocks vpncli)
-    $guiProc = Get-Process -Name "csc_ui","vpnui" -ErrorAction SilentlyContinue
-    if ($guiProc) {
-        Write-Host "[..] Closing Cisco GUI client (blocks CLI)..." -ForegroundColor Yellow
-        $guiProc | Stop-Process -Force
-        Start-Sleep -Seconds 2
+    if (-not (Stop-CiscoClientBlockers)) { return }
+
+    # Resolve DUO method: explicit param > config saved value > default "push"
+    $effectiveDuo = $DuoMethod
+    if (-not $PSBoundParameters.ContainsKey('DuoMethod') -and $config.DuoMethod) {
+        $effectiveDuo = $config.DuoMethod
     }
 
     Write-Host "[->] Connecting to: $server" -ForegroundColor Cyan
     Write-Host "     User: $($cred.Username)" -ForegroundColor Gray
-    Write-Host "     DUO method: $DuoMethod" -ForegroundColor Gray
+    Write-Host "     DUO method: $effectiveDuo" -ForegroundColor Gray
 
-    # Determine DUO second factor input
-    # DUO MFA prompt shows numbered options (e.g. "1-Push to X-3808")
-    # Default: "1" for push. Override with -DuoMethod for other options.
-    $duoInput = "1"
-    if ($DuoMethod -eq "phone") { $duoInput = "2" }
-    elseif ($DuoMethod -eq "sms") { $duoInput = "3" }
-    elseif ($DuoMethod -eq "passcode") {
-        $code = Get-TOTPCode
-        if ($code) {
-            $duoInput = $code
-            Write-Host "     TOTP code: $code" -ForegroundColor Gray
+    # Determine DUO second factor input (1=push, 2=phone, 3=sms, or TOTP)
+    $totpForDuo = $null
+    if ($effectiveDuo -eq "passcode") {
+        $totpForDuo = Get-TOTPCode
+        if ($totpForDuo) {
+            Write-Host "     TOTP code: $totpForDuo" -ForegroundColor Gray
         } else {
-            Write-Host "[!!] TOTP secret not found. Run: .\vpn-auto-connect.ps1 -SaveTOTP" -ForegroundColor Red
+            Write-Host "[!!] TOTP secret not found. Run: vpn-config totp" -ForegroundColor Red
             return
         }
     }
+    $duoInput = Get-DuoCliInput -EffectiveDuo $effectiveDuo -TotpCode $totpForDuo
 
-    Write-Host "[..] Connecting..." -ForegroundColor Yellow
-    if ($DuoMethod -eq "push") {
-        Write-Host "[>>] Please tap 'Approve' on your DUO mobile push" -ForegroundColor Yellow
+    $showCliOutput = ($VerbosePreference -eq 'Continue') -or ($env:VPN_DEBUG -eq '1')
+
+    if (-not (Test-Path $VpnCliPath)) {
+        Write-Host "[!!] vpncli not found: $VpnCliPath" -ForegroundColor Red
+        return
     }
 
-    # Start vpncli with stdin redirect
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $VpnCliPath
-    $psi.Arguments = "-s"
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
+    Write-Host "[..] Connecting..." -ForegroundColor Yellow
+    Write-Host "[*] Automated mode: do not type here; script sends all vpncli input." -ForegroundColor DarkGray
+    if ($showCliOutput) {
+        Write-Host "[*] VPN_DEBUG: vpncli log prints after steps complete (mid-connect read would block)." -ForegroundColor DarkGray
+    }
+    if ($effectiveDuo -eq "push") {
+        Write-Host "[>>] Please tap 'Approve' on your DUO mobile push when prompted" -ForegroundColor Yellow
+    }
 
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    $connectAddr = $server
+    if ($config.Port -and $config.Port -ne "443") {
+        $connectAddr = "${server}:$($config.Port)"
+    }
+
+    $session = $null
+    $connected = $false
 
     try {
-        # Wait for vpncli to initialize
-        Start-Sleep -Seconds 4
-
-        # Step 1: Connect to server (with port if configured)
-        $connectAddr = $server
-        if ($config.Port -and $config.Port -ne "443") {
-            $connectAddr = "${server}:$($config.Port)"
+        $session = New-VpnCliSession -CliPath $VpnCliPath -ShowOutput $showCliOutput
+        $connectParams = @{
+            Session       = $session
+            ConnectAddr   = $connectAddr
+            Cred          = $cred
+            Config        = $config
+            DuoInput      = $duoInput
+            EffectiveDuo  = $effectiveDuo
+            ShowCliOutput = $showCliOutput
         }
-        Write-Host "[1/6] Connecting to $connectAddr..." -ForegroundColor Gray
-        $proc.StandardInput.WriteLine("connect $connectAddr")
-        Start-Sleep -Seconds 8
-
-        # Step 2: Select group (0 = Default)
-        Write-Host "[2/6] Selecting group..." -ForegroundColor Gray
-        $groupNum = "0"
-        if ($config.Group -eq "Library Resources Only") { $groupNum = "1" }
-        $proc.StandardInput.WriteLine($groupNum)
-        Start-Sleep -Seconds 3
-
-        # Step 3: Username (press Enter to accept default)
-        Write-Host "[3/6] Sending username..." -ForegroundColor Gray
-        $proc.StandardInput.WriteLine("")
-        Start-Sleep -Seconds 3
-
-        # Step 4: Password
-        Write-Host "[4/6] Sending password..." -ForegroundColor Gray
-        $proc.StandardInput.WriteLine($cred.Password)
-        Start-Sleep -Seconds 4
-
-        # Step 5: DUO second factor
-        Write-Host "[5/6] Sending DUO option ($duoInput)..." -ForegroundColor Gray
-        $proc.StandardInput.WriteLine($duoInput)
-        if ($DuoMethod -eq "passcode") {
-            Start-Sleep -Seconds 5
-        } else {
-            Write-Host "[>>] Waiting for DUO approval (up to 60s)..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 60
-        }
-
-        # Step 6: Accept certificate (if prompted)
-        Write-Host "[6/6] Accepting certificate..." -ForegroundColor Gray
-        $proc.StandardInput.WriteLine("y")
-
-        # Wait and collect output (with timeout, don't block on EndOfStream)
-        Start-Sleep -Seconds 5
-        $output = ""
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($sw.Elapsed.TotalSeconds -lt 15) {
-            if (-not $proc.StandardOutput.EndOfStream) {
-                $output += [char]$proc.StandardOutput.Read()
-            } else {
-                Start-Sleep -Milliseconds 300
-            }
-        }
-
-        Write-Host $output -ForegroundColor DarkGray
-
-        # Check connection by looking for VPN network interface
-        Start-Sleep -Seconds 3
-        $vpnAdapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Get-NetIPAddress -ErrorAction SilentlyContinue |
-            Where-Object { $_.IPAddress -match "^10\." }
-
-        if ($vpnAdapter) {
-            Write-Host "[OK] VPN connected (IP: $($vpnAdapter.IPAddress))" -ForegroundColor Green
-        } elseif ($output -match "Connected") {
-            Write-Host "[OK] VPN connected" -ForegroundColor Green
-        } elseif ($output -match "Login denied|failed|ʧ") {
-            Write-Host "[!!] Authentication failed" -ForegroundColor Red
-        } else {
-            Write-Host "[??] Check output above" -ForegroundColor Yellow
-        }
+        $result = Invoke-VpnConnectTimed @connectParams
+        $connected = $result.Connected
     } catch {
         Write-Host "[!!] Error: $_" -ForegroundColor Red
     } finally {
-        if (-not $proc.HasExited) {
-            $proc.Kill()
+        if ($session) {
+            Stop-VpnCliSession -Session $session -Connected $connected
         }
-        $proc.Dispose()
     }
 }
 
 # vpn-disconnect: 断开 VPN 并重启 GUI 客户端 / Disconnect VPN and restart GUI client
 function Disconnect-Vpn {
     Write-Host "[x] Disconnecting VPN..." -ForegroundColor Cyan
-    $result = "disconnect" | & $VpnCliPath -s 2>&1
-    $result | ForEach-Object { Write-Host "   $_" -ForegroundColor Gray }
+    Invoke-VpnCliDisconnectQuiet
+    & taskkill.exe /IM vpncli.exe /F /T 2>$null | Out-Null
     Write-Host "[OK] Disconnected" -ForegroundColor Green
 
     # Restart GUI client if it was killed during connect
@@ -782,11 +1334,23 @@ function Disconnect-Vpn {
 }
 
 # ---------- Main Logic ----------
-if ($Reconfigure) {
-    # Remove existing config and re-run setup
+
+if ($LoadFunctionsOnly) { return }
+
+# One-time legacy migration (root files -> profiles/default)
+Migrate-LegacyConfigIfNeeded
+
+if ($Reconfigure -or $Reset) {
+    # Full reset: clear legacy + all profiles + TOTP
     Remove-Item $ConfigFile -Force -ErrorAction SilentlyContinue
     Remove-Item $CredFile -Force -ErrorAction SilentlyContinue
-    Write-Host "[*] Configuration cleared. Running setup..." -ForegroundColor Yellow
+    Remove-Item $TotpFile -Force -ErrorAction SilentlyContinue
+    if (Test-Path $ProfilesDir) { Remove-Item $ProfilesDir -Recurse -Force }
+    Remove-Item $ProfilesIndex -Force -ErrorAction SilentlyContinue
+    Remove-Item $ActiveProfileFile -Force -ErrorAction SilentlyContinue
+    Write-Host "[*] All configuration cleared." -ForegroundColor Yellow
+    if ($Reset) { exit 0 }
+    # $Reconfigure continues to interactive setup
 }
 
 # ---------- Profile Commands ----------
@@ -795,7 +1359,16 @@ if ($Add) {
     exit 0
 }
 if ($Ls) {
-    List-VpnProfiles
+    # Alias: vpn-ls -> vpn-config -Brief
+    Show-Config -Brief
+    exit 0
+}
+if ($Config) {
+    if ($Brief) {
+        Show-Config -Brief
+    } else {
+        Show-Config
+    }
     exit 0
 }
 if ($Use) {
@@ -827,17 +1400,17 @@ if ($List) {
     Write-Host "  vpn-connect      " -NoNewline; Write-Host "-> Connect (DUO push)" -ForegroundColor Gray
     Write-Host "  vpn-disconnect   " -NoNewline; Write-Host "-> Disconnect" -ForegroundColor Gray
     Write-Host "  vpn-status       " -NoNewline; Write-Host "-> Show status" -ForegroundColor Gray
-    Write-Host "  vpn-setup        " -NoNewline; Write-Host "-> Save credentials (legacy)" -ForegroundColor Gray
-    Write-Host "  vpn-totp         " -NoNewline; Write-Host "-> Save TOTP secret" -ForegroundColor Gray
-    Write-Host "  vpn-reconfig     " -NoNewline; Write-Host "-> Reset and reconfigure" -ForegroundColor Gray
-    Write-Host "  vpn-help         " -NoNewline; Write-Host "-> Detailed help" -ForegroundColor Gray
+    Write-Host "  vpn-gui          " -NoNewline; Write-Host "-> Launch GUI manager" -ForegroundColor Gray
     Write-Host "-------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  Profile Management:" -ForegroundColor Yellow
-    Write-Host "  vpn-ls           " -NoNewline; Write-Host "-> List all profiles" -ForegroundColor Gray
-    Write-Host "  vpn-add          " -NoNewline; Write-Host "-> Add new profile" -ForegroundColor Gray
-    Write-Host "  vpn-use <name>   " -NoNewline; Write-Host "-> Switch active profile" -ForegroundColor Gray
-    Write-Host "  vpn-rm <name>    " -NoNewline; Write-Host "-> Remove a profile" -ForegroundColor Gray
-    Write-Host "  vpn-edit <name>  " -NoNewline; Write-Host "-> Edit profile settings" -ForegroundColor Gray
+    Write-Host "  Configuration (vpn-config):" -ForegroundColor Yellow
+    Write-Host "  vpn-config              " -NoNewline; Write-Host "-> Show all settings" -ForegroundColor Gray
+    Write-Host "  vpn-config list         " -NoNewline; Write-Host "-> List all profiles" -ForegroundColor Gray
+    Write-Host "  vpn-config add          " -NoNewline; Write-Host "-> Add new profile" -ForegroundColor Gray
+    Write-Host "  vpn-config use <name>   " -NoNewline; Write-Host "-> Switch active profile" -ForegroundColor Gray
+    Write-Host "  vpn-config set <k> <v>  " -NoNewline; Write-Host "-> Quick setting change" -ForegroundColor Gray
+    Write-Host "  vpn-config totp         " -NoNewline; Write-Host "-> Save TOTP secret" -ForegroundColor Gray
+    Write-Host "  vpn-config rm <name>    " -NoNewline; Write-Host "-> Remove a profile" -ForegroundColor Gray
+    Write-Host "  vpn-config reset-all    " -NoNewline; Write-Host "-> Full reset and reconfigure" -ForegroundColor Gray
     Write-Host "-------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
     exit 0
@@ -858,21 +1431,16 @@ if ($Help) {
     Write-Host "  -Disconnect                Disconnect VPN"
     Write-Host "  -Status                    Show connection status"
     Write-Host ""
-    Write-Host "SETUP:" -ForegroundColor Yellow
-    Write-Host "  -SaveCredentials           Save / update credentials (legacy)"
-    Write-Host "  -SaveTOTP                  Save / update TOTP secret"
-    Write-Host "  -Reconfigure               Reset and re-run setup"
-    Write-Host ""
-    Write-Host "PROFILES:" -ForegroundColor Yellow
-    Write-Host "  -Add                       Add new VPN profile"
-    Write-Host "  -Ls                        List all profiles"
-    Write-Host "  -Use <name>                Switch active profile"
-    Write-Host "  -Rm <name>                 Remove a profile"
-    Write-Host "  -Edit <name>               Edit profile settings"
-    Write-Host ""
-    Write-Host "QUICK SETTINGS:" -ForegroundColor Yellow
-    Write-Host "  -Set <key> -SetValue <val> Change a single setting"
+    Write-Host "CONFIGURATION (vpn-config subcommands):" -ForegroundColor Yellow
+    Write-Host "  vpn-config                 Show all settings"
+    Write-Host "  vpn-config list            List all profiles"
+    Write-Host "  vpn-config add             Add new VPN profile"
+    Write-Host "  vpn-config use <name>      Switch active profile"
+    Write-Host "  vpn-config set <k> <v>     Change a single setting"
     Write-Host "    Keys: server, group, port, protocol, user, duo"
+    Write-Host "  vpn-config totp            Save / update TOTP secret"
+    Write-Host "  vpn-config rm <name>       Remove a profile"
+    Write-Host "  vpn-config reset-all       Full reset and re-setup"
     Write-Host ""
     Write-Host "DUO METHODS:" -ForegroundColor Yellow
     Write-Host "  push       (default) Send push notification to phone"
@@ -884,24 +1452,23 @@ if ($Help) {
     Write-Host "  .\vpn-auto-connect.ps1                          # First setup"
     Write-Host "  .\vpn-auto-connect.ps1 -Connect                 # Connect (DUO push)"
     Write-Host "  .\vpn-auto-connect.ps1 -Connect -DuoMethod passcode  # Full auto"
-    Write-Host "  .\vpn-auto-connect.ps1 -Add                     # Add new profile"
-    Write-Host "  .\vpn-auto-connect.ps1 -Use dku                 # Switch profile"
-    Write-Host "  .\vpn-auto-connect.ps1 -Set server -SetValue vpn.company.com"
     Write-Host ""
     Write-Host "GLOBAL COMMANDS:" -ForegroundColor Yellow
     Write-Host "  vpn              List all available commands"
     Write-Host "  vpn-connect      Connect (DUO push)"
     Write-Host "  vpn-disconnect   Disconnect"
     Write-Host "  vpn-status       Show status"
-    Write-Host "  vpn-setup        Save credentials (legacy)"
-    Write-Host "  vpn-totp         Save TOTP secret"
-    Write-Host "  vpn-reconfig     Reset and reconfigure"
-    Write-Host "  vpn-ls           List all profiles"
-    Write-Host "  vpn-add          Add new profile"
-    Write-Host "  vpn-use <name>   Switch active profile"
-    Write-Host "  vpn-rm <name>    Remove a profile"
-    Write-Host "  vpn-edit <name>  Edit profile"
-    Write-Host "  vpn-set <k> <v>  Quick setting change"
+    Write-Host "  vpn-gui          Launch GUI manager"
+    Write-Host ""
+    Write-Host "CONFIGURATION (vpn-config):" -ForegroundColor Yellow
+    Write-Host "  vpn-config                 Show all settings"
+    Write-Host "  vpn-config list            List all profiles"
+    Write-Host "  vpn-config add             Add new profile"
+    Write-Host "  vpn-config use <name>      Switch active profile"
+    Write-Host "  vpn-config set <k> <v>     Quick setting change"
+    Write-Host "  vpn-config totp            Save TOTP secret"
+    Write-Host "  vpn-config rm <name>       Remove a profile"
+    Write-Host "  vpn-config reset-all       Full reset and reconfigure"
     Write-Host ""
     Write-Host "CONFIG DIRECTORY:" -ForegroundColor Yellow
     Write-Host "  $ConfigDir"
