@@ -299,6 +299,99 @@ Assert-Equal (Get-VpnGroupSelection -Config $cfgLib) "1" "Library group maps to 
 $cfgEmpty = @{ Group = "" }
 Assert-Equal (Get-VpnGroupSelection -Config $cfgEmpty) "0" "Empty group -> 0"
 
+# Session status helpers
+Assert-Equal (Format-VpnSessionTimeSpan -TimeSpan ([TimeSpan]::FromSeconds(3661))) "1:01:01" "Session timespan formatting is stable"
+
+$mockStatsOutput = @"
+Connection State: Connected
+Duration: 1:23:45
+Remaining Session Time: 22:36:15
+Server Address: portal.dukekunshan.edu.cn
+Client Address (IPv4): 10.200.1.20
+"@
+Assert-Equal (Get-VpnSessionStatLine -Output $mockStatsOutput -Patterns @('Connection State:\s*(.+)')) "Connected" "Session stat parser reads state"
+Assert-Equal (Get-VpnSessionStatLine -Output $mockStatsOutput -Patterns @('Duration:\s*([0-9:]+)')) "1:23:45" "Session stat parser reads duration"
+
+$origVpnCliPath = $script:VpnCliPath
+$origStateFiles = $script:CiscoVpnStateFiles
+$stateTestDir = Join-Path $env:TEMP "vpn-state-test-$(Get-Random)"
+New-Item -ItemType Directory -Path $stateTestDir -Force | Out-Null
+try {
+    $stateFile = Join-Path $stateTestDir "ConfigParam.bin"
+    Set-Content -Path $stateFile -Value "x"
+    (Get-Item $stateFile).LastWriteTime = (Get-Date).AddHours(-2).AddMinutes(-3).AddSeconds(-4)
+    $script:VpnCliPath = Join-Path $stateTestDir "missing-vpncli.exe"
+    $script:CiscoVpnStateFiles = @($stateFile)
+    $fallbackStats = Get-VpnSessionStats
+    Assert-Match $fallbackStats.Duration '^2:03:0[4-6]$' "Session stats fall back to state file duration"
+    Assert-Match $fallbackStats.Remaining '^21:56:5[4-6]$' "Session stats fall back to remaining time"
+} finally {
+    $script:VpnCliPath = $origVpnCliPath
+    $script:CiscoVpnStateFiles = $origStateFiles
+    Remove-Item $stateTestDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$origGetCimInstance = $null
+if (Test-Path function:Get-CimInstance) {
+    $origGetCimInstance = (Get-Item function:Get-CimInstance).ScriptBlock
+}
+$origGetProcess = $null
+if (Test-Path function:Get-Process) {
+    $origGetProcess = (Get-Item function:Get-Process).ScriptBlock
+}
+function Get-CimInstance {
+    param([string]$ClassName)
+    return @([pscustomobject]@{
+        Name = "vpnagent"
+        DisplayName = "Cisco Secure Client VPN Agent"
+        State = "Running"
+        PathName = "C:\Program Files (x86)\Cisco\Cisco Secure Client\vpnagent.exe"
+    })
+}
+function Get-Process {
+    param([string]$Name)
+    return @()
+}
+Assert-True (Test-VpnAgentRunning) "vpnagent check passes when service is running"
+
+function Get-CimInstance {
+    param([string]$ClassName)
+    return @([pscustomobject]@{
+        Name = "vpnagent"
+        DisplayName = "Cisco Secure Client VPN Agent"
+        State = "Stopped"
+        PathName = "C:\Program Files (x86)\Cisco\Cisco Secure Client\vpnagent.exe"
+    })
+}
+Assert-True (-not (Test-VpnAgentRunning)) "vpnagent check fails when detected service is stopped"
+
+function Get-CimInstance {
+    param([string]$ClassName)
+    return @()
+}
+function Get-Process {
+    param([string]$Name)
+    return @([pscustomobject]@{ Name = "vpnagent" })
+}
+Assert-True (Test-VpnAgentRunning) "vpnagent check passes when process is running"
+
+function Get-Process {
+    param([string]$Name)
+    return @()
+}
+Assert-True (Test-VpnAgentRunning) "vpnagent check allows unknown installs to continue"
+
+if ($null -ne $origGetCimInstance) {
+    Set-Item -Path function:Get-CimInstance -Value $origGetCimInstance
+} else {
+    Remove-Item function:Get-CimInstance -ErrorAction SilentlyContinue
+}
+if ($null -ne $origGetProcess) {
+    Set-Item -Path function:Get-Process -Value $origGetProcess
+} else {
+    Remove-Item function:Get-Process -ErrorAction SilentlyContinue
+}
+
 # Wait-ForVpnPrompt (mock buffer)
 $mockBuf = New-Object System.Text.StringBuilder
 $mockSync = New-Object object

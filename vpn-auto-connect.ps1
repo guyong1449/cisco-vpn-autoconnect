@@ -71,6 +71,12 @@ $TotpFile   = "$ConfigDir\totp.xml"
 $ProfilesDir      = "$ConfigDir\profiles"
 $ProfilesIndex    = "$ConfigDir\profiles.json"
 $ActiveProfileFile = "$ConfigDir\active_profile"
+$CiscoVpnStateFiles = @(
+    "$env:ProgramData\Cisco\Cisco Secure Client\VPN\ConfigParam.bin",
+    "$env:ProgramData\Cisco\Cisco Secure Client\VPN\routechangesv4.bin",
+    "$env:ProgramData\Cisco\Cisco Secure Client\VPN\routechangesv6.bin"
+)
+$VpnSessionLimitSeconds = 24 * 60 * 60
 
 # ---------- Init Directory ----------
 if (-not (Test-Path $ConfigDir)) {
@@ -833,17 +839,46 @@ function Stop-CiscoClientBlockers {
     return $true
 }
 
+function Test-VpnAgentRunning {
+    $serviceCandidates = @()
+    try {
+        $serviceCandidates = @(Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object {
+            ($_.Name -match 'vpnagent') -or
+            ($_.DisplayName -match 'Cisco.*VPN Agent|Cisco Secure Client.*VPN Agent|AnyConnect.*VPN Agent') -or
+            ($_.PathName -match 'vpnagent(?:d)?\.exe')
+        })
+    } catch {
+        $serviceCandidates = @()
+    }
+
+    if ($serviceCandidates.Count -gt 0) {
+        $runningService = $serviceCandidates | Where-Object { $_.State -eq 'Running' } | Select-Object -First 1
+        if ($runningService) {
+            return $true
+        }
+        $serviceNames = ($serviceCandidates | ForEach-Object {
+            if ($_.DisplayName) { $_.DisplayName } else { $_.Name }
+        }) -join ', '
+        Write-Host "[!!] Cisco vpnagent service is not running. Start it or reinstall Cisco Secure Client." -ForegroundColor Red
+        if ($serviceNames) {
+            Write-Host "     Detected agent service(s): $serviceNames" -ForegroundColor Yellow
+        }
+        return $false
+    }
+
+    if (Get-Process -Name 'vpnagent' -ErrorAction SilentlyContinue) {
+        return $true
+    }
+
+    Write-Host "[*] Could not verify Cisco vpnagent service by name; continuing." -ForegroundColor DarkGray
+    return $true
+}
+
 # vpn-status: 优先检查 Cisco 隧道网卡，回退到 10.x.x.x IP / Cisco tunnel adapter first, then 10.x.x.x fallback
 function Get-VpnStatus {
-    # Check Cisco virtual adapter first; fall back to any 10.x tunnel-like IP.
-    $vpnAdapter = Get-VpnTunnelAddress
-
-    if ($vpnAdapter) {
+    if (Get-VpnTunnelAddress) {
         Write-Host "[OK] VPN connected" -ForegroundColor Green
-        Write-Host "     IP: $($vpnAdapter.IPAddress)" -ForegroundColor Gray
-        if ($vpnAdapter.InterfaceAlias) {
-            Write-Host "     Adapter: $($vpnAdapter.InterfaceAlias)" -ForegroundColor Gray
-        }
+        Show-VpnConnectionStatus
     } else {
         Write-Host "[!!] VPN not connected" -ForegroundColor Red
     }
@@ -900,6 +935,144 @@ function Get-VpnTunnelAddress {
             $_.IPAddress -notmatch '^169\.254\.'
         } |
         Select-Object -First 1
+}
+
+function Format-VpnSessionTimeSpan {
+    param([TimeSpan]$TimeSpan)
+    return "{0}:{1:00}:{2:00}" -f [int][Math]::Floor($TimeSpan.TotalHours), $TimeSpan.Minutes, $TimeSpan.Seconds
+}
+
+function Get-VpnSessionStatLine {
+    param(
+        [string]$Output,
+        [string[]]$Patterns
+    )
+    foreach ($pattern in $Patterns) {
+        $match = [regex]::Match($Output, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($match.Success) {
+            return $match.Groups[1].Value.Trim()
+        }
+    }
+    return ""
+}
+
+function Get-VpnSessionStats {
+    $timing = @{
+        Duration = ""
+        Remaining = ""
+        State = ""
+        Server = ""
+        ClientIP = ""
+    }
+
+    $latestStateFile = $CiscoVpnStateFiles |
+        Where-Object { Test-Path $_ } |
+        Get-Item -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if ($latestStateFile) {
+        $durationSpan = (Get-Date) - $latestStateFile.LastWriteTime
+        if ($durationSpan.TotalSeconds -lt 0) {
+            $durationSpan = [TimeSpan]::Zero
+        }
+        $remainingSpan = [TimeSpan]::FromSeconds([Math]::Max(0, $VpnSessionLimitSeconds - [int][Math]::Floor($durationSpan.TotalSeconds)))
+        $timing.Duration = Format-VpnSessionTimeSpan -TimeSpan $durationSpan
+        $timing.Remaining = Format-VpnSessionTimeSpan -TimeSpan $remainingSpan
+    }
+
+    if (-not (Test-Path $VpnCliPath)) {
+        return $timing
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $VpnCliPath
+    $psi.Arguments = "-s"
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $proc = $null
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $null
+        $stderr = $null
+        $proc.StandardInput.WriteLine("stats")
+        $proc.StandardInput.WriteLine("exit")
+        $proc.StandardInput.Flush()
+        if (-not $proc.WaitForExit(10000)) {
+            try { $proc.Kill() } catch { }
+        }
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $output = "$stdout`n$stderr"
+
+        $stats = @{
+            Duration = Get-VpnSessionStatLine -Output $output -Patterns @(
+                '持续时间：\s*([0-9:]+)',
+                'Duration:\s*([0-9:]+)'
+            )
+            Remaining = Get-VpnSessionStatLine -Output $output -Patterns @(
+                '剩余(?:会话)?(?:时间|时长)：\s*(.+)',
+                '(?:会话)?(?:时间|时长)剩余：\s*(.+)',
+                'Remaining(?: Session)? Time:\s*(.+)',
+                'Session Time Remaining:\s*(.+)',
+                'Time Remaining:\s*(.+)'
+            )
+            State = Get-VpnSessionStatLine -Output $output -Patterns @(
+                '连接状态：\s*(.+)',
+                'Connection State:\s*(.+)',
+                '>>\s*state:\s*(.+)'
+            )
+            Server = Get-VpnSessionStatLine -Output $output -Patterns @(
+                'Server Address：\s*(.+)',
+                'Server Address:\s*(.+)'
+            )
+            ClientIP = Get-VpnSessionStatLine -Output $output -Patterns @(
+                '客户端地址 \(IPv4\)：\s*(.+)',
+                'Client Address \(IPv4\):\s*(.+)'
+            )
+        }
+
+        foreach ($key in $stats.Keys) {
+            if ($stats[$key]) {
+                $timing[$key] = $stats[$key]
+            }
+        }
+    } catch {
+    } finally {
+        if ($proc) {
+            try { $proc.Dispose() } catch { }
+        }
+    }
+
+    return $timing
+}
+
+function Show-VpnConnectionStatus {
+    $vpnAdapter = Get-VpnTunnelAddress
+    $stats = Get-VpnSessionStats
+
+    if ($vpnAdapter) {
+        Write-Host "     IP: $($vpnAdapter.IPAddress)" -ForegroundColor Gray
+        if ($vpnAdapter.InterfaceAlias) {
+            Write-Host "     Adapter: $($vpnAdapter.InterfaceAlias)" -ForegroundColor Gray
+        }
+    }
+    if ($stats.Server) {
+        Write-Host "     Server: $($stats.Server)" -ForegroundColor Gray
+    }
+    if ($stats.Duration) {
+        Write-Host "     Duration: $($stats.Duration)" -ForegroundColor Gray
+    }
+    if ($stats.Remaining) {
+        Write-Host "     Remaining: $($stats.Remaining)" -ForegroundColor Gray
+    }
+    if ($stats.State) {
+        Write-Host "     Connection State: $($stats.State)" -ForegroundColor Gray
+    }
 }
 
 function Test-VpnConnectedByIp {
@@ -1386,6 +1559,19 @@ function Connect-Vpn {
     if (-not $config) { $config = Load-Config }
     $server = $cred.Server
 
+    $existingTunnel = Get-VpnTunnelAddress
+    if ($existingTunnel) {
+        Write-Host "[OK] VPN already connected" -ForegroundColor Green
+        Show-VpnConnectionStatus
+        Write-VpnResultMarker -State CONNECTED
+        return
+    }
+
+    if (-not (Test-VpnAgentRunning)) {
+        Write-VpnResultMarker -State FAILED
+        return
+    }
+
     if (-not (Stop-CiscoClientBlockers)) {
         Write-VpnResultMarker -State FAILED
         return
@@ -1455,7 +1641,15 @@ function Connect-Vpn {
         $result = Invoke-VpnConnectTimed @connectParams
         $connected = $result.Connected
     } catch {
-        Write-Host "[!!] Error: $_" -ForegroundColor Red
+        $errorText = $_.Exception.Message
+        if (-not $errorText) { $errorText = "$_" }
+        if ($session -and $errorText -match 'vpncli exited before stdin write \(group\)') {
+            Read-VpnCliOutputFinal -Session $session -MaxSeconds 3
+            $earlyOutput = Get-VpnSessionText -Session $session
+            Write-VpnCliTail -Output $earlyOutput -Force
+            Write-Host "[!!] vpncli could not reach the server. Check: network, DNS, vpnagent service." -ForegroundColor Red
+        }
+        Write-Host "[!!] Error: $errorText" -ForegroundColor Red
         Write-VpnResultMarker -State FAILED
         $resultMarkerWritten = $true
     } finally {
