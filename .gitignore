@@ -17,6 +17,7 @@ build/
 # VPN config (contains credentials - never commit!)
 .vpn-auto-connect/
 .specstory/
+.cursorindexingignore
 
 # Logs
 *.log
