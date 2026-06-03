@@ -13,9 +13,9 @@ User configuration is encrypted with Windows DPAPI.
 
 > **Windows only.**
 > Run commands in **PowerShell** or **CMD**.
-> The GUI is a Python app.
-> Connect, disconnect, and config still go through the PowerShell core script.
-> Before connecting, if Cisco GUI (`csc_ui`) or another `vpncli` holds the connection lock, the script ends those processes.
+> The GUI is supported by Python while
+> connect, disconnect, and config still go through the PowerShell core script.
+> Before connecting, if Cisco GUI (`csc_ui`) or another `vpncli` holds the connection lock, the script automatically ends those processes.
 
 ## Features
 
