@@ -286,6 +286,11 @@ Assert-Equal (Get-DuoCliInput -EffectiveDuo "phone" -TotpCode "") "2" "Get-DuoCl
 Assert-Equal (Get-DuoCliInput -EffectiveDuo "sms" -TotpCode "") "3" "Get-DuoCliInput sms -> 3"
 Assert-Equal (Get-DuoCliInput -EffectiveDuo "passcode" -TotpCode "123456") "123456" "Get-DuoCliInput passcode -> TOTP"
 
+# GUI result markers
+Assert-Equal (Get-VpnResultMarker -State "CONNECTED") "VPN_RESULT=CONNECTED" "Connected marker format"
+Assert-Equal (Get-VpnResultMarker -State "FAILED") "VPN_RESULT=FAILED" "Failed marker format"
+Assert-Equal (Get-VpnResultMarker -State "TIMEOUT") "VPN_RESULT=TIMEOUT" "Timeout marker format"
+
 # Get-VpnGroupSelection
 $cfgDku = @{ Group = "-Default-" }
 Assert-Equal (Get-VpnGroupSelection -Config $cfgDku) "0" "Default group maps to menu index 0"
@@ -312,6 +317,50 @@ Assert-True $found "Wait-ForVpnPrompt matches Password prompt"
 $mockSession = @{ Buffer = $mockBuf; Sync = $mockSync }
 Wait-VpnStepOrDelay -Session $mockSession -Pattern 'DUO' -MaxSeconds 1
 Assert-True $true "Wait-VpnStepOrDelay completes (timed fallback when pattern absent)"
+
+# Wait-ForVpnIpAfterExit
+$origTestVpnConnectedByIp = ${function:Test-VpnConnectedByIp}
+$script:IpCheckCount = 0
+function Test-VpnConnectedByIp {
+    $script:IpCheckCount++
+    return ($script:IpCheckCount -ge 3)
+}
+$graceConnected = Wait-ForVpnIpAfterExit -MaxSeconds 1 -PollMilliseconds 10
+Assert-True $graceConnected "Wait-ForVpnIpAfterExit keeps polling until IP appears"
+Set-Item -Path function:Test-VpnConnectedByIp -Value $origTestVpnConnectedByIp
+
+# DUO wait timing and tunnel diagnostics
+$scriptText = Get-Content $ps1Path -Raw
+Assert-Match $scriptText 'Waiting for DUO approval \(up to 50s\)' "DUO wait message uses 50s"
+Assert-Match $scriptText 'Wait-ForVpnTunnelAfterMfa[\s\S]*MaxSeconds = 50' "Post-MFA tunnel wait uses 50s"
+Assert-Match $scriptText 'BannerFirstSendSeconds = 4' "Post-MFA banner confirmation starts after 4s"
+Assert-Match $scriptText "StepLabel 'banner-certificate'" "Post-MFA banner/certificate y retry exists"
+Assert-True ($scriptText -notmatch "duo-retry") "Live connect path does not retry DUO input"
+Assert-Match $scriptText 'Stop-VpnCliForFailureAndDrain' "Failure path drains vpncli output after stopping process"
+
+$diagNoAdapter = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @() -CiscoAddresses @() -TenAddresses @() } *>&1 | Out-String)
+Assert-Match $diagNoAdapter 'vpncli: unavailable' "Diagnostics show missing vpncli"
+Assert-Match $diagNoAdapter 'Cisco adapter: not found' "Diagnostics show no Cisco adapter"
+Assert-Match $diagNoAdapter '10\.x IPv4: none' "Diagnostics show no 10.x address"
+
+$disabledAdapter = [pscustomobject]@{
+    Name = "以太网 2"
+    Status = "Disabled"
+    InterfaceDescription = "Cisco AnyConnect Virtual Miniport Adapter for Windows x64"
+}
+$diagDisabled = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @($disabledAdapter) -CiscoAddresses @() -TenAddresses @() } *>&1 | Out-String)
+Assert-Match $diagDisabled 'Cisco adapter: .*Disabled.*Cisco AnyConnect' "Diagnostics show disabled Cisco adapter"
+Assert-Match $diagDisabled 'Cisco IPv4: none' "Diagnostics show disabled adapter has no IPv4"
+
+$upAdapter = [pscustomobject]@{
+    Name = "Cisco VPN"
+    Status = "Up"
+    InterfaceDescription = "Cisco Secure Client Virtual Adapter"
+}
+$ciscoAddr = [pscustomobject]@{ IPAddress = "10.200.1.20" }
+$diagUp = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @($upAdapter) -CiscoAddresses @($ciscoAddr) -TenAddresses @($ciscoAddr) } *>&1 | Out-String)
+Assert-Match $diagUp 'Cisco adapter: .*Up.*Cisco Secure Client' "Diagnostics show up Cisco adapter"
+Assert-Match $diagUp 'Cisco IPv4: 10\.200\.1\.20' "Diagnostics show Cisco IPv4"
 
 # ============================================================
 Write-Host "`n========================================" -ForegroundColor Cyan

@@ -833,16 +833,17 @@ function Stop-CiscoClientBlockers {
     return $true
 }
 
-# vpn-status: 检查 10.x.x.x IP 判断是否已连接 / Check 10.x.x.x IP to detect VPN connection
+# vpn-status: 优先检查 Cisco 隧道网卡，回退到 10.x.x.x IP / Cisco tunnel adapter first, then 10.x.x.x fallback
 function Get-VpnStatus {
-    # Check by network interface (more reliable than vpncli status)
-    $vpnAdapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } |
-        Get-NetIPAddress -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -match "^10\." }
+    # Check Cisco virtual adapter first; fall back to any 10.x tunnel-like IP.
+    $vpnAdapter = Get-VpnTunnelAddress
 
     if ($vpnAdapter) {
         Write-Host "[OK] VPN connected" -ForegroundColor Green
         Write-Host "     IP: $($vpnAdapter.IPAddress)" -ForegroundColor Gray
+        if ($vpnAdapter.InterfaceAlias) {
+            Write-Host "     Adapter: $($vpnAdapter.InterfaceAlias)" -ForegroundColor Gray
+        }
     } else {
         Write-Host "[!!] VPN not connected" -ForegroundColor Red
     }
@@ -871,11 +872,111 @@ function Get-DuoCliInput {
     }
 }
 
+function Get-VpnTunnelAddress {
+    $ciscoAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+        $_.Status -eq "Up" -and (
+            $_.InterfaceDescription -match 'Cisco AnyConnect|Cisco Secure Client' -or
+            $_.Name -match 'Cisco|AnyConnect'
+        )
+    }
+
+    if ($ciscoAdapters) {
+        $addr = $ciscoAdapters |
+            Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.IPAddress -and
+                $_.IPAddress -notmatch '^169\.254\.' -and
+                $_.IPAddress -notmatch '^127\.'
+            } |
+            Select-Object -First 1
+        if ($addr) { return $addr }
+    }
+
+    return Get-NetAdapter -ErrorAction SilentlyContinue |
+        Where-Object { $_.Status -eq "Up" } |
+        Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -match '^10\.' -and
+            $_.IPAddress -notmatch '^169\.254\.'
+        } |
+        Select-Object -First 1
+}
+
 function Test-VpnConnectedByIp {
-    $vpnAdapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } |
-        Get-NetIPAddress -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -match "^10\." }
-    return [bool]$vpnAdapter
+    return [bool](Get-VpnTunnelAddress)
+}
+
+function Write-VpnTunnelDiagnostics {
+    param(
+        $Session = $null,
+        $CiscoAdapters = $null,
+        $CiscoAddresses = $null,
+        $TenAddresses = $null
+    )
+
+    Write-Host "--- VPN tunnel diagnostics ---" -ForegroundColor DarkGray
+
+    $proc = $null
+    if ($Session -and $Session.Process) { $proc = $Session.Process }
+    if ($proc) {
+        if ($proc.HasExited) {
+            Write-Host "vpncli: exited (PID $($proc.Id), exit $($proc.ExitCode))" -ForegroundColor DarkGray
+        } else {
+            Write-Host "vpncli: running (PID $($proc.Id))" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "vpncli: unavailable" -ForegroundColor DarkGray
+    }
+
+    if ($null -eq $CiscoAdapters) {
+        $CiscoAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+            $_.InterfaceDescription -match 'Cisco AnyConnect|Cisco Secure Client' -or
+            $_.Name -match 'Cisco|AnyConnect'
+        }
+    }
+    if ($null -eq $CiscoAddresses) {
+        $CiscoAddresses = @()
+        foreach ($adapter in @($CiscoAdapters)) {
+            if ($adapter.ifIndex) {
+                $CiscoAddresses += Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.IPAddress -and
+                        $_.IPAddress -notmatch '^169\.254\.' -and
+                        $_.IPAddress -notmatch '^127\.'
+                    }
+            }
+        }
+    }
+    if ($null -eq $TenAddresses) {
+        $TenAddresses = Get-NetAdapter -ErrorAction SilentlyContinue |
+            Where-Object { $_.Status -eq "Up" } |
+            Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -match '^10\.' -and $_.IPAddress -notmatch '^169\.254\.' }
+    }
+
+    if ($CiscoAdapters) {
+        foreach ($adapter in @($CiscoAdapters)) {
+            Write-Host "Cisco adapter: $($adapter.Name) | $($adapter.Status) | $($adapter.InterfaceDescription)" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "Cisco adapter: not found" -ForegroundColor DarkGray
+    }
+
+    if ($CiscoAddresses) {
+        foreach ($addr in @($CiscoAddresses)) {
+            Write-Host "Cisco IPv4: $($addr.IPAddress)" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "Cisco IPv4: none" -ForegroundColor DarkGray
+    }
+
+    if ($TenAddresses) {
+        foreach ($addr in @($TenAddresses)) {
+            Write-Host "10.x IPv4: $($addr.IPAddress)" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "10.x IPv4: none" -ForegroundColor DarkGray
+    }
 }
 
 function Get-VpnCliBufferText {
@@ -969,34 +1070,30 @@ function Get-VpnSessionText {
     return $Session.Buffer.ToString()
 }
 
-# Non-blocking read: ReadLine() blocks when vpncli waits for stdin at a prompt (e.g. group menu).
-function Drain-VpnCliOutput {
-    param(
-        $Session,
-        [int]$MaxSeconds = 1
-    )
+# Read redirected pipes only after vpncli has exited. Reading while the process is
+# still interactive can block on Windows even when no complete line is available.
+function Drain-VpnCliOutputAfterExit {
+    param($Session)
     $proc = $Session.Process
     if (-not $proc -or -not $proc.StandardOutput) { return }
+    if (-not $proc.HasExited) { return }
+    if ($Session.OutputDrained) { return }
     $buf = $Session.Buffer
     $echo = $Session.ShowOutput
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
-        $readAny = $false
-        foreach ($stream in @($proc.StandardOutput, $proc.StandardError)) {
-            if (-not $stream) { continue }
-            try {
-                while ($stream.Peek() -ge 0) {
-                    $line = $stream.ReadLine()
-                    if ($null -eq $line) { break }
-                    [void]$buf.AppendLine($line)
-                    if ($echo) { Write-Host "   | $line" -ForegroundColor DarkGray }
-                    $readAny = $true
-                }
-            } catch { break }
-        }
-        if ($proc.HasExited -and -not $readAny) { break }
-        if (-not $readAny) { Start-Sleep -Milliseconds 50 }
+    $readAny = $false
+    foreach ($stream in @($proc.StandardOutput, $proc.StandardError)) {
+        if (-not $stream) { continue }
+        try {
+            $text = $stream.ReadToEnd()
+            if ($text) {
+                [void]$buf.Append($text)
+                if ($echo) { Write-Host -NoNewline $text }
+                $readAny = $true
+            }
+        } catch { }
     }
+    $Session.OutputDrained = $true
+    if ($echo -and $readAny) { Write-Host "" }
 }
 
 function New-VpnCliSession {
@@ -1017,6 +1114,7 @@ function New-VpnCliSession {
         Buffer     = (New-Object System.Text.StringBuilder)
         ShowOutput = $ShowOutput
         Tasks      = @()
+        OutputDrained = $false
     }
 }
 
@@ -1032,9 +1130,7 @@ function Write-VpnConnectResult {
     if (-not $ShowCliOutput -and $Output) {
         Write-Host $Output -ForegroundColor DarkGray
     }
-    $vpnAdapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } |
-        Get-NetIPAddress -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -match "^10\." }
+    $vpnAdapter = Get-VpnTunnelAddress
 
     if ($vpnAdapter) {
         Write-Host "[OK] VPN connected (IP: $($vpnAdapter.IPAddress))" -ForegroundColor Green
@@ -1048,8 +1144,24 @@ function Write-VpnConnectResult {
         Write-Host "[!!] Authentication failed" -ForegroundColor Red
         return $false
     }
-    Write-Host "[??] Check output above (no 10.x IP detected)" -ForegroundColor Yellow
+    Write-Host "[??] Check output above (no VPN tunnel IP detected)" -ForegroundColor Yellow
     return $false
+}
+
+function Get-VpnResultMarker {
+    param(
+        [ValidateSet("CONNECTED", "FAILED", "TIMEOUT")]
+        [string]$State
+    )
+    return "VPN_RESULT=$State"
+}
+
+function Write-VpnResultMarker {
+    param(
+        [ValidateSet("CONNECTED", "FAILED", "TIMEOUT")]
+        [string]$State
+    )
+    Write-Host (Get-VpnResultMarker -State $State) -ForegroundColor DarkGray
 }
 
 function Wait-VpnStepOrDelay {
@@ -1061,15 +1173,59 @@ function Wait-VpnStepOrDelay {
     )
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
-        Drain-VpnCliOutput -Session $Session -MaxSeconds 1
         $text = Get-VpnSessionText -Session $Session
         if ($WatchAuthFailure -and (Test-VpnCliAuthFailed -Text $text)) { return 'auth-failed' }
         if ($text -match $Pattern) { return 'ok' }
         if ($Session.Process -and $Session.Process.HasExited) { return 'exited' }
         Start-Sleep -Milliseconds 200
     }
-    Drain-VpnCliOutput -Session $Session -MaxSeconds 1
     return 'timeout'
+}
+
+function Wait-ForVpnIpAfterExit {
+    param(
+        [int]$MaxSeconds = 20,
+        [int]$PollMilliseconds = 300
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
+        if (Test-VpnConnectedByIp) { return $true }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+    return (Test-VpnConnectedByIp)
+}
+
+function Wait-ForVpnTunnelAfterMfa {
+    param(
+        $Session,
+        [int]$MaxSeconds = 50,
+        [int]$PollMilliseconds = 300,
+        [int]$BannerFirstSendSeconds = 4,
+        [int]$ResendSeconds = 5
+    )
+    $proc = $Session.Process
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastSendSecond = -1
+    $acceptLogWritten = $false
+    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
+        if (Test-VpnConnectedByIp) { return $true }
+        if ($proc -and $proc.HasExited) {
+            Write-Host "[..] vpncli exited after MFA/banner wait; checking tunnel IP for 20s..." -ForegroundColor DarkGray
+            return (Wait-ForVpnIpAfterExit -MaxSeconds 20 -PollMilliseconds $PollMilliseconds)
+        }
+        $elapsedWholeSeconds = [int][Math]::Floor($sw.Elapsed.TotalSeconds)
+        if ($elapsedWholeSeconds -ge $BannerFirstSendSeconds -and
+            ($lastSendSecond -lt 0 -or ($elapsedWholeSeconds - $lastSendSecond) -ge $ResendSeconds)) {
+            if (-not $acceptLogWritten) {
+                Write-Host "[6/6] Accepting banner/certificate (if prompted)..." -ForegroundColor Gray
+                $acceptLogWritten = $true
+            }
+            [void](Send-VpnCliLineIfAlive -Process $proc -Line "y" -Session $Session -StepLabel 'banner-certificate')
+            $lastSendSecond = $elapsedWholeSeconds
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+    return (Test-VpnConnectedByIp)
 }
 
 # Read stdout only AFTER all stdin sent (reading during vpncli prompts blocks on Windows).
@@ -1079,24 +1235,23 @@ function Read-VpnCliOutputFinal {
         [int]$MaxSeconds = 15
     )
     $proc = $Session.Process
-    if (-not $proc -or -not $proc.StandardOutput) { return }
-    $buf = $Session.Buffer
-    $echo = $Session.ShowOutput
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
-        if (-not $proc.StandardOutput.EndOfStream) {
-            $ch = $proc.StandardOutput.Read()
-            if ($ch -ge 0) {
-                $c = [char]$ch
-                [void]$buf.Append($c)
-                if ($echo) { Write-Host -NoNewline $c }
-            }
-        } else {
-            Start-Sleep -Milliseconds 300
-            if ($proc.HasExited) { break }
-        }
+    if (-not $proc) { return }
+    if (-not $proc.HasExited) {
+        [void]$proc.WaitForExit($MaxSeconds * 1000)
     }
-    if ($echo) { Write-Host "" }
+    Drain-VpnCliOutputAfterExit -Session $Session
+}
+
+function Stop-VpnCliForFailureAndDrain {
+    param($Session)
+    $proc = $Session.Process
+    if (-not $proc) { return }
+    if (-not $proc.HasExited) {
+        Write-Host "[..] vpncli still running after tunnel wait; stopping it to capture final output..." -ForegroundColor DarkGray
+        try { $proc.Kill() } catch { }
+        try { [void]$proc.WaitForExit(3000) } catch { }
+    }
+    Drain-VpnCliOutputAfterExit -Session $Session
 }
 
 function Complete-VpnConnectTimed {
@@ -1119,7 +1274,12 @@ function Complete-VpnConnectTimed {
     }
     if (Test-VpnConnectedByIp) { $Connected = $true }
     $Connected = Write-VpnConnectResult -Connected $Connected -Output $output -ShowCliOutput $ShowCliOutput
-    if (-not $Connected) { Write-VpnCliTail -Output $output -Force }
+    if (-not $Connected) {
+        Stop-VpnCliForFailureAndDrain -Session $Session
+        $output = Get-VpnSessionText -Session $Session
+        Write-VpnTunnelDiagnostics -Session $Session
+        Write-VpnCliTail -Output $output -Force
+    }
     return @{ Connected = $Connected; CertAccepted = $true; AuthFailed = $false }
 }
 
@@ -1138,7 +1298,7 @@ function Invoke-VpnConnectTimed {
     $connected = $false
 
     # Fixed delays between stdin writes (vpncli on Windows does not expose prompts on stdout).
-    # MFA uses wait + optional retry instead of one long sleep — faster when server is quick, still reliable when slow.
+    # After MFA input, keep banner/cert acceptance active while polling for the tunnel.
     Start-Sleep -Seconds 2
 
     Write-Host "[1/6] Connecting to $ConnectAddr..." -ForegroundColor Gray
@@ -1175,30 +1335,8 @@ function Invoke-VpnConnectTimed {
     if ($EffectiveDuo -eq "push") {
         Write-Host "[>>] Please tap 'Approve' on your DUO mobile push" -ForegroundColor Yellow
     }
-    $bannerSent = $false
-    $duoRetried = $false
     if ($EffectiveDuo -ne "passcode") {
-        Write-Host "[>>] Waiting for DUO approval (up to 90s)..." -ForegroundColor Yellow
-        $waitSw = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($waitSw.Elapsed.TotalSeconds -lt 90) {
-            if (Test-VpnConnectedByIp) { $connected = $true; break }
-            if ($proc.HasExited) { break }
-            # Retry DUO once if server was slow showing MFA (avoids empty 答： without a 22s fixed wait).
-            if (-not $duoRetried -and $waitSw.Elapsed.TotalSeconds -ge 10) {
-                if (Send-VpnCliLineIfAlive -Process $proc -Line $DuoInput -Session $Session -StepLabel 'duo-retry') {
-                    $duoRetried = $true
-                }
-            }
-            # Banner/cert after DUO approval — not during MFA entry.
-            if (-not $bannerSent -and $waitSw.Elapsed.TotalSeconds -ge 20) {
-                if (Send-VpnCliLineIfAlive -Process $proc -Line "y" -Session $Session -StepLabel 'banner') {
-                    $bannerSent = $true
-                }
-            }
-            Start-Sleep -Milliseconds 300
-        }
-    } else {
-        Start-Sleep -Seconds 3
+        Write-Host "[>>] Waiting for DUO approval (up to 50s)..." -ForegroundColor Yellow
     }
 
     if ($connected -or (Test-VpnConnectedByIp)) {
@@ -1209,11 +1347,9 @@ function Invoke-VpnConnectTimed {
         return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 8
     }
 
-    Write-Host "[6/6] Accepting certificate (if prompted)..." -ForegroundColor Gray
-    [void](Send-VpnCliLineIfAlive -Process $proc -Line "y" -Session $Session -StepLabel 'certificate')
-    Start-Sleep -Seconds 2
+    $connected = Wait-ForVpnTunnelAfterMfa -Session $Session -MaxSeconds 50 -PollMilliseconds 300 -BannerFirstSendSeconds 4 -ResendSeconds 5
 
-    return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 8
+    return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 10
 }
 
 # Invoke-VpnConnectPrompted removed: vpncli does not expose prompts on redirected stdout (Windows).
@@ -1241,13 +1377,19 @@ function Connect-Vpn {
     # 优先使用活跃 Profile，回退到旧版配置 / Try active profile first, fall back to legacy config
     $cred = Load-ActiveProfileCredentials
     if (-not $cred) { $cred = Load-VpnCredentials }
-    if (-not $cred) { return }
+    if (-not $cred) {
+        Write-VpnResultMarker -State FAILED
+        return
+    }
 
     $config = Load-ActiveProfileConfig
     if (-not $config) { $config = Load-Config }
     $server = $cred.Server
 
-    if (-not (Stop-CiscoClientBlockers)) { return }
+    if (-not (Stop-CiscoClientBlockers)) {
+        Write-VpnResultMarker -State FAILED
+        return
+    }
 
     # Resolve DUO method: explicit param > config saved value > default "push"
     $effectiveDuo = $DuoMethod
@@ -1267,6 +1409,7 @@ function Connect-Vpn {
             Write-Host "     TOTP code: $totpForDuo" -ForegroundColor Gray
         } else {
             Write-Host "[!!] TOTP secret not found. Run: vpn-config totp" -ForegroundColor Red
+            Write-VpnResultMarker -State FAILED
             return
         }
     }
@@ -1276,6 +1419,7 @@ function Connect-Vpn {
 
     if (-not (Test-Path $VpnCliPath)) {
         Write-Host "[!!] vpncli not found: $VpnCliPath" -ForegroundColor Red
+        Write-VpnResultMarker -State FAILED
         return
     }
 
@@ -1295,6 +1439,7 @@ function Connect-Vpn {
 
     $session = $null
     $connected = $false
+    $resultMarkerWritten = $false
 
     try {
         $session = New-VpnCliSession -CliPath $VpnCliPath -ShowOutput $showCliOutput
@@ -1311,9 +1456,18 @@ function Connect-Vpn {
         $connected = $result.Connected
     } catch {
         Write-Host "[!!] Error: $_" -ForegroundColor Red
+        Write-VpnResultMarker -State FAILED
+        $resultMarkerWritten = $true
     } finally {
         if ($session) {
             Stop-VpnCliSession -Session $session -Connected $connected
+        }
+    }
+    if (-not $resultMarkerWritten) {
+        if ($connected) {
+            Write-VpnResultMarker -State CONNECTED
+        } else {
+            Write-VpnResultMarker -State FAILED
         }
     }
 }

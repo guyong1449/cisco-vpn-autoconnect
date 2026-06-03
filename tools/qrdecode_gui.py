@@ -15,6 +15,23 @@ except ImportError:
     print("Missing: pip install pyzbar Pillow")
     sys.exit(1)
 
+UI_LATIN_FONT = "Segoe UI"
+UI_CJK_FONT = "SimSun"
+MONO_LATIN_FONT = "Cascadia Code"
+
+def _has_cjk(text):
+    return any("\u4e00" <= ch <= "\u9fff" for ch in str(text))
+
+
+def ui_font(size, *styles, text=""):
+    family = UI_CJK_FONT if _has_cjk(text) else UI_LATIN_FONT
+    return (family, size, *styles)
+
+
+def mono_font(size, *styles, text=""):
+    family = UI_CJK_FONT if _has_cjk(text) else MONO_LATIN_FONT
+    return (family, size, *styles)
+
 
 # -- Color palette (Catppuccin Mocha) --
 C = {
@@ -58,7 +75,7 @@ class FlatButton(tk.Canvas):
     """Custom flat button with rounded corners, hover, and click flash."""
 
     def __init__(self, parent, text, command, bg, fg, hover_bg=None,
-                 font=("Segoe UI", 10), padx=18, pady=8, status_cb=None, **kw):
+                 font=None, padx=18, pady=8, status_cb=None, **kw):
         self.command = command
         self.bg = bg
         self.hover_bg = hover_bg or self._adjust(bg, 20)
@@ -67,9 +84,10 @@ class FlatButton(tk.Canvas):
         self.text = text
         self._hovered = False
         self._status_cb = status_cb
+        self.font = font or ui_font(10, text=text)
 
         # Measure text
-        tmp = tk.Label(parent, text=text, font=font)
+        tmp = tk.Label(parent, text=text, font=self.font)
         tw = tmp.winfo_reqwidth()
         th = tmp.winfo_reqheight()
         tmp.destroy()
@@ -106,7 +124,7 @@ class FlatButton(tk.Canvas):
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
         self._round_rect(0, 0, w, h, self._r, color)
         self.create_text(w // 2, h // 2, text=text or self.text,
-                         fill=self.fg, font=("Segoe UI", 10))
+                         fill=self.fg, font=self.font)
 
     def _adjust(self, hex_color, amount):
         hex_color = hex_color.lstrip("#")
@@ -170,10 +188,10 @@ class App:
         header = tk.Frame(self.root, bg=C["bg"])
         header.pack(fill="x", padx=20, pady=(18, 4))
 
-        tk.Label(header, text="QR Decode", font=("Segoe UI", 16, "bold"),
+        tk.Label(header, text="QR Decode", font=ui_font(16, "bold", text="QR Decode"),
                  bg=C["bg"], fg=C["text"]).pack(side="left")
 
-        tk.Label(header, text="v1.0", font=("Segoe UI", 9),
+        tk.Label(header, text="v1.0", font=ui_font(9, text="v1.0"),
                  bg=C["bg"], fg=C["muted"]).pack(side="left", padx=(6, 0), pady=(4, 0))
 
         # -- Collapsible help --
@@ -185,13 +203,13 @@ class App:
         self.help_toggle.pack(fill="x", padx=20, pady=(8, 0))
 
         self.help_arrow = tk.Label(
-            self.help_toggle, text="[+]", font=("Consolas", 10),
+            self.help_toggle, text="[+]", font=mono_font(10, text="[+]"),
             bg=C["surface"], fg=C["muted"], padx=8
         )
         self.help_arrow.pack(side="left", pady=6)
 
         self.help_title = tk.Label(
-            self.help_toggle, text="What does this do?", font=("Segoe UI", 10),
+            self.help_toggle, text="What does this do?", font=ui_font(10, text="What does this do?"),
             bg=C["surface"], fg=C["subtext"]
         )
         self.help_title.pack(side="left", pady=6)
@@ -224,7 +242,7 @@ class App:
             "    * General QR -- decode URLs, WiFi configs, vCards, etc."
         )
         tk.Label(
-            self.help_body, text=help_text, font=("Cascadia Code", 9),
+            self.help_body, text=help_text, font=mono_font(9, text=help_text),
             bg=C["surface"], fg=C["subtext"], justify="left", anchor="w",
             padx=12, pady=10
         ).pack(fill="x")
@@ -237,7 +255,7 @@ class App:
         self.drop_inner.pack(fill="x", padx=2, pady=2)
 
         self.drop_icon = tk.Label(
-            self.drop_inner, text="[ + ]", font=("Consolas", 24),
+            self.drop_inner, text="[ + ]", font=mono_font(24, text="[ + ]"),
             bg=C["surface"], fg=C["muted"]
         )
         self.drop_icon.pack(pady=(20, 6))
@@ -245,7 +263,7 @@ class App:
         self.drop_hint = tk.Label(
             self.drop_inner,
             text="Ctrl+V  paste image\nClick to open file\nDrag file here",
-            font=("Segoe UI", 10), bg=C["surface"], fg=C["muted"],
+            font=ui_font(10, text="Ctrl+V  paste image"), bg=C["surface"], fg=C["muted"],
             justify="center"
         )
         self.drop_hint.pack(pady=(0, 20))
@@ -260,7 +278,7 @@ class App:
         # Supported formats
         tk.Label(
             self.root, text="PNG  JPG  BMP  GIF  WEBP",
-            font=("Segoe UI", 9), bg=C["bg"], fg=C["muted"]
+            font=ui_font(9, text="PNG  JPG  BMP  GIF  WEBP"), bg=C["bg"], fg=C["muted"]
         ).pack(padx=20, pady=(4, 0), anchor="w")
 
         # Preview
@@ -297,12 +315,12 @@ class App:
         out_header = tk.Frame(out_card, bg=C["surface"])
         out_header.pack(fill="x", padx=8, pady=(8, 0))
 
-        tk.Label(out_header, text="Output", font=("Segoe UI", 9, "bold"),
+        tk.Label(out_header, text="Output", font=ui_font(9, "bold", text="Output"),
                  bg=C["surface"], fg=C["subtext"]).pack(side="left")
 
         self.output = scrolledtext.ScrolledText(
             out_card, height=8, bg=C["surface"], fg=C["text"],
-            font=("Cascadia Code", 10), relief="flat",
+            font=mono_font(10, text="otpauth://"), relief="flat",
             insertbackground=C["text"], selectbackground=C["blue"],
             selectforeground=C["crust"], wrap="word", state="disabled",
             bd=0, padx=10, pady=8
@@ -312,7 +330,7 @@ class App:
         # Status bar
         self.status = tk.Label(
             self.root, text="Ready", bg=C["mantle"], fg=C["muted"],
-            font=("Segoe UI", 8), anchor="w", padx=10, pady=4
+            font=ui_font(8, text="Ready"), anchor="w", padx=10, pady=4
         )
         self.status.pack(side="bottom", fill="x")
 
@@ -394,7 +412,7 @@ class App:
     def _context_menu(self, event):
         menu = tk.Menu(self.root, tearoff=0, bg=C["surface"], fg=C["text"],
                        activebackground=C["blue"], activeforeground=C["crust"],
-                       font=("Segoe UI", 9), relief="flat")
+                       font=ui_font(9, text="Paste Image"), relief="flat")
         menu.add_command(label="Paste Image", command=self.paste_clipboard)
         menu.add_command(label="Open File", command=self.open_file)
         menu.add_separator()

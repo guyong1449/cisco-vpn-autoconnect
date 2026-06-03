@@ -1,4 +1,4 @@
-# VPN Auto-Connect Agent
+# Cisco VPN AutoConnect Agent
 
 Cisco Secure Client auto-connect tool with DUO 2FA support.
 
@@ -9,10 +9,10 @@ Cisco Secure Client auto-connect tool with DUO 2FA support.
 - **Unified Config View**: `vpn-config` shows all profiles; `vpn-config list` for compact list
 - **One-Click Settings**: `vpn-config set` (server/group/port/protocol/user/duo)
 - **Disconnect**: `vpn-disconnect` — vpncli disconnect + restart Cisco GUI
-- **GUI Manager**: Implemented (vpn-gui.py) with DKU VPN preset, password toggle, right-click copy
+- **GUI Manager**: Implemented (vpn-gui.py) with DKU VPN preset, password toggle, right-click copy, taskbar/window icon, ip.me button, session timer
 - **Config Viewer**: `vpn-config` — all profiles, credentials status, TOTP status
 - **QR Tools**: Integrated (qrdecode.py + qrdecode_gui.py)
-- **Unit Tests**: `tests/Test-VpnFunctions.ps1` (54 tests)
+- **Unit Tests**: `tests/Test-VpnFunctions.ps1` (71 tests)
 - **Window Suppression**: BAT/CMD launchers use .vbs wrappers to avoid CMD window flash
 - **Legacy Migration**: Auto-migrates root config files to `profiles/default` on first run
 - **DUO Method Resolution**: explicit param > config.DuoMethod > default `push`
@@ -28,27 +28,29 @@ Cisco Secure Client auto-connect tool with DUO 2FA support.
 
 ## Recent Changes
 
-- **Timed connect (`Invoke-VpnConnectTimed`)**: Fixed delays + DUO retry; no mid-connect stdout read (blocks on Windows)
-- **MFA timing**: Wait ~8s after password before DUO `1`; retry `1` at +10s if needed; banner `y` at +20s (not during MFA)
-- **Early success exit**: Stop when `10.x.x.x` IP detected — skip step 6 sleep
+- **Timed connect (`Invoke-VpnConnectTimed`)**: Fixed delays; DUO input is sent once; no mid-connect stdout read (blocks on Windows)
+- **MFA timing**: Wait ~8s after password before DUO `1`; wait 4s after DUO before retrying banner/cert `y`; poll tunnel for 50s
+- **Early success exit**: Stop when the Cisco tunnel adapter is up with IPv4, falling back to `10.x.x.x` detection — skip step 6 sleep
 - **Blocker skip**: `Stop-CiscoClientBlockers` returns immediately when no `csc_ui`/`vpnui`/`vpncli` (saves ~3–7s)
 - **Post-DUO exit**: vpncli often exits with code -1 after connect — treat as success if VPN IP is up
 - **CLI merge**: Config/profile commands under `vpn-config <subcommand>`; old commands are deprecation redirects
 - **Legacy migration**, **TOTP per-profile**, **DuoMethod resolution**, **vpn-connect passcode param fix**
-- **GUI**: DKU preset, password toggle, group free text, right-click copy, profile display mapping
+- **GUI**: DKU preset, password toggle, group free text, right-click copy, profile display mapping, .ico/AppUserModelID icon, ip.me shortcut, duration/remaining display
 
 ## File Structure
 
 ```
-tools/vpn-auto-connect/
+cisco-vpn-autoconnect/
 ├── AGENTS.md                  # This file
 ├── README.md                  # Bilingual documentation
 ├── LICENSE                    # MIT License
 ├── .gitignore
 ├── vpn-auto-connect.ps1       # Core script (PowerShell)
-├── vpn_auto_connect.py        # Alternative (Python + wexpect)
 ├── vpn-gui.bat                # GUI launcher (calls vpn-gui.vbs)
 ├── vpn-gui.vbs                # VBS silent launcher for GUI
+│
+├── assets/
+│   └── vpn-auto-connect.ico   # GUI window/taskbar icon
 │
 ├── cmd/                       # Entry point scripts (ASCII-only @REM comments)
 │   ├── vpn.cmd                # List commands
@@ -77,7 +79,7 @@ tools/vpn-auto-connect/
     └── vpn-gui.py             # VPN GUI manager
 │
 └── tests/                     # Unit tests
-    └── Test-VpnFunctions.ps1    # 54 tests (run: powershell -File tests/Test-VpnFunctions.ps1)
+    └── Test-VpnFunctions.ps1    # 71 tests (run: powershell -File tests/Test-VpnFunctions.ps1)
 ```
 
 ## Main Interfaces
@@ -89,7 +91,7 @@ tools/vpn-auto-connect/
 | `vpn` | (none) | List all available commands |
 | `vpn-connect` | `[push\|phone\|sms\|passcode]` | Connect to VPN (DUO method as positional arg) |
 | `vpn-disconnect` | (none) | Disconnect VPN |
-| `vpn-status` | (none) | Show connection status (checks 10.x.x.x IP) |
+| `vpn-status` | (none) | Show connection status (Cisco tunnel adapter first, then 10.x.x.x fallback) |
 | `vpn-gui` | (none) | Launch GUI manager |
 
 ### Config Commands (unified via vpn-config)
@@ -129,15 +131,14 @@ tools/vpn-auto-connect/
 - **Configs button**: View all profiles with credentials and settings
 - **Right-click menu**: Copy / Copy All / Select All on Log and Configs text areas
 - **Profile display**: Internal name `dku` shown as "DKU VPN" in dropdown
+- **Window/taskbar icon**: `assets/vpn-auto-connect.ico` is applied via Tk `iconbitmap`; `SetCurrentProcessExplicitAppUserModelID` is set before creating `Tk()` to avoid Python/Spyder taskbar grouping
+- **Public IP shortcut**: `[ ip.me ]` opens `https://ip.me/` with a hover tooltip
+- **Session timer**: Shows Remaining and Duration when connected
 
 ### Direct Script Usage
 
 ```powershell
-# PowerShell
 .\vpn-auto-connect.ps1 -Connect -DuoMethod passcode
-
-# Python
-python vpn_auto_connect.py --connect --duo-method passcode
 ```
 
 ## Parameters
@@ -229,12 +230,12 @@ vpn-connect [duo-method]
   ├─ [3/6] username                    (wait 2s)
   ├─ [4/6] password                    (wait 6s)
   ├─ [5/6] wait for MFA prompt (8s) → send 1/2/3 or TOTP
-  │         ├─ Poll 10.x IP up to 90s; retry DUO input once at +10s if needed
-  │         ├─ Send banner/cert `y` at +20s (after MFA, not before)
+  │         ├─ Poll Cisco tunnel adapter / 10.x IP up to 50s
+  │         ├─ Send banner/cert `y` every 5s starting 4s after DUO input
   │         └─ Push: user taps Approve on phone
-  ├─ If 10.x IP detected → success (skip step 6)
+  ├─ If tunnel IP detected → success (skip step 6)
   ├─ [6/6] send `y` if vpncli still running
-  └─ Read stdout buffer; confirm 10.x.x.x = connected
+  └─ Read stdout buffer after vpncli exits; confirm tunnel IP = connected
 ```
 
 **Windows vpncli I/O**: Do **not** read stdout while vpncli waits at interactive prompts (group/username/password/MFA) — `ReadLine()` blocks. Use **timed stdin writes**; collect output in `Read-VpnCliOutputFinal` after steps complete.
@@ -249,6 +250,61 @@ vpn-disconnect
   ├─ taskkill vpncli.exe (cleanup stray CLI)
   └─ Restart csc_ui.exe (GUI killed during connect)
 ```
+
+## Config Directory
+
+```
+~/.vpn-auto-connect/          # Auto-created
+├── config.json               # Server config (legacy)
+├── credentials.xml           # Encrypted credentials (legacy)
+├── totp.xml                  # Encrypted TOTP secret
+├── profiles.json             # Profile index
+├── active_profile            # Active profile name
+└── profiles/                 # Multi-profile directory
+    ├── dku/
+    │   ├── config.json
+    │   ├── credentials.xml
+    │   └── totp.xml
+    └── company/
+        ├── config.json
+        └── credentials.xml
+```
+
+## Launch Entry Points
+
+```
+vpn-gui / cmd\vpn-gui.cmd
+  └─ vpn-gui.vbs
+      └─ pythonw tools\vpn-gui.py
+
+vpn-connect / cmd\vpn-connect.cmd
+  └─ powershell -File vpn-auto-connect.ps1 -Connect
+```
+
+- `*.cmd` / `*.bat` files are thin entry wrappers for PATH usage or double-click launches.
+- `*.vbs` files only launch GUI tools silently to avoid console-window flashes.
+- `tools/vpn-gui.py` is a GUI shell; connect, disconnect, and config behavior still lives in `vpn-auto-connect.ps1`.
+- The VPN GUI uses `assets/vpn-auto-connect.ico` and sets a Windows AppUserModelID to avoid showing the Python/Spyder icon on the taskbar.
+
+## GUI Data Paths
+
+```
+vpn-gui / cmd\vpn-gui.cmd
+  └─ vpn-gui.vbs
+      └─ pythonw tools\vpn-gui.py
+          └─ vpn-auto-connect.ps1 -Connect/-Disconnect/-Status/-Config
+```
+
+- `tools/vpn-gui.py` is a thin UI shell. It does not drive `vpncli` directly for authentication.
+- Connect/disconnect/config operations go through `vpn-auto-connect.ps1`.
+- GUI logs stream the PowerShell process output and then perform a second tunnel-IP status poll.
+- Connected state detection calls PowerShell `Get-NetAdapter` / `Get-NetIPAddress`: Cisco tunnel adapter first, fallback to active `10.x.x.x`.
+- Session timing first tries `vpncli.exe -s` with `stats`; if Cisco does not expose duration/remaining, GUI falls back to Cisco local VPN state file `LastWriteTime`:
+  - `C:\ProgramData\Cisco\Cisco Secure Client\VPN\ConfigParam.bin`
+  - `C:\ProgramData\Cisco\Cisco Secure Client\VPN\routechangesv4.bin`
+  - `C:\ProgramData\Cisco\Cisco Secure Client\VPN\routechangesv6.bin`
+- Timer math is display-only: `Duration = now - state file timestamp`, `Remaining = 24h - Duration`. It does not affect connect success/failure.
+- GUI session labels are calibrated on status refresh, then updated by a local 1-second Tk timer; do not poll Cisco/PowerShell every second.
 
 ## Implementation Notes
 
@@ -266,15 +322,15 @@ vpn-disconnect
 - `vpn-disconnect` restarts `csc_ui.exe` after disconnect
 
 ### VPN Status Detection
-- Checks for `10.x.x.x` IP on any active network adapter
+- Checks Cisco AnyConnect / Cisco Secure Client virtual adapter first, then falls back to `10.x.x.x` on active adapters
 - More reliable than `vpncli.exe status` (encoding issues)
 - DKU VPN typically assigns `10.200.x.x` range
 
 ### DUO MFA Input (Timed Mode)
 - DKU DUO prompt: `1-Push to X-3808` — script sends `1` / `2` / `3` or TOTP passcode
 - **Do not send DUO too early** — empty `答：` + `登录失败` means MFA input missed
-- Flow: password → wait 8s → send DUO → optional retry at +10s → banner `y` at +20s
-- Push: approve on phone during 90s IP poll loop
+- Flow: password → wait 8s → send DUO once → wait 4s → retry banner/cert `y` while polling tunnel
+- Push: approve on phone during 50s tunnel poll loop
 - TOTP: `Get-TOTPCode` from active profile `totp.xml`, then global fallback
 
 ### Connect Implementation (PowerShell)
@@ -289,8 +345,8 @@ vpn-disconnect
 | Symptom | Likely cause | Action |
 |---------|--------------|--------|
 | `登录失败` right after Password | Wrong saved password | `vpn-config set user <netid>` (re-enter password) |
-| `答：` empty + `登录失败` | DUO `1` sent before MFA prompt | Fixed by MFA wait + retry; retry `vpn-connect`, approve push quickly |
-| Error at step 6, but VPN works | vpncli exited after auth (normal) | Use `vpn-status`; script now treats 10.x IP as success |
+| `答：` empty + `登录失败` | DUO `1` sent before MFA prompt | Fixed by MFA wait; retry `vpn-connect`, approve push quickly |
+| Error at step 6, but VPN works | vpncli exited after auth (normal) | Use `vpn-status`; script now treats Cisco tunnel adapter or 10.x IP as success |
 | Connect blocked at start | GUI still running | Quit Cisco tray app or let script kill blockers |
 | Slow connect | Fixed delays + DUO approval + tunnel setup | Approve push promptly; unavoidable network time |
 
