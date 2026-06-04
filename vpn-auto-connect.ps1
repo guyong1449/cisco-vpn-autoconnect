@@ -1054,12 +1054,15 @@ function Get-VpnSessionStats {
 function Show-VpnConnectionStatus {
     $vpnAdapter = Get-VpnTunnelAddress
     $stats = Get-VpnSessionStats
+    $displayState = Resolve-VpnDisplayState -Stats $stats -Tunnel $vpnAdapter
 
     if ($vpnAdapter) {
         Write-Host "     IP: $($vpnAdapter.IPAddress)" -ForegroundColor Gray
         if ($vpnAdapter.InterfaceAlias) {
             Write-Host "     Adapter: $($vpnAdapter.InterfaceAlias)" -ForegroundColor Gray
         }
+    } elseif ($stats.ClientIP) {
+        Write-Host "     IP: $($stats.ClientIP)" -ForegroundColor Gray
     }
     if ($stats.Server) {
         Write-Host "     Server: $($stats.Server)" -ForegroundColor Gray
@@ -1070,13 +1073,48 @@ function Show-VpnConnectionStatus {
     if ($stats.Remaining) {
         Write-Host "     Remaining: $($stats.Remaining)" -ForegroundColor Gray
     }
-    if ($stats.State) {
-        Write-Host "     Connection State: $($stats.State)" -ForegroundColor Gray
+    if ($displayState) {
+        Write-Host "     Connection State: $displayState" -ForegroundColor Gray
     }
 }
 
+function Resolve-VpnDisplayState {
+    param(
+        $Stats,
+        $Tunnel = $null
+    )
+
+    $state = ""
+    if ($Stats -and $Stats.State) {
+        $state = [string]$Stats.State
+    }
+    if ($state -and $state -notmatch '^\s*Unknown\s*$') {
+        return $state
+    }
+
+    $hasClientIp = $Stats -and $Stats.ClientIP -and $Stats.ClientIP -notmatch '^(?:0\.0\.0\.0)?\s*$'
+    if ($Tunnel -or $hasClientIp) {
+        return "Connected"
+    }
+    return $state
+}
+
+function Test-VpnSessionConnected {
+    $stats = Get-VpnSessionStats
+    if (-not $stats) { return $false }
+
+    if ($stats.State -match '(^|[^A-Za-z])(Connected|Established)($|[^A-Za-z])|已连接|已連線') {
+        return $true
+    }
+    if ($stats.ClientIP -and $stats.ClientIP -notmatch '^(?:0\.0\.0\.0)?\s*$') {
+        return $true
+    }
+    return $false
+}
+
 function Test-VpnConnectedByIp {
-    return [bool](Get-VpnTunnelAddress)
+    if (Get-VpnTunnelAddress) { return $true }
+    return (Test-VpnSessionConnected)
 }
 
 function Write-VpnTunnelDiagnostics {

@@ -331,6 +331,48 @@ try {
     Remove-Item $stateTestDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+$origGetVpnSessionStats = ${function:Get-VpnSessionStats}
+$origGetVpnTunnelAddress = ${function:Get-VpnTunnelAddress}
+Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Unknown"; ClientIP = "10.200.1.20" } -Tunnel $null) "Connected" "Display state overrides Unknown when client IP exists"
+Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Unknown"; ClientIP = "" } -Tunnel ([pscustomobject]@{ IPAddress = "10.200.1.20" })) "Connected" "Display state overrides Unknown when tunnel exists"
+Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Disconnected"; ClientIP = "" } -Tunnel $null) "Disconnected" "Display state preserves non-Unknown state"
+function Get-VpnSessionStats {
+    return @{
+        State = "Connected"
+        ClientIP = ""
+        Duration = ""
+        Remaining = ""
+        Server = ""
+    }
+}
+function Get-VpnTunnelAddress { return $null }
+Assert-True (Test-VpnSessionConnected) "Session-connected fallback recognizes Connected state"
+Assert-True (Test-VpnConnectedByIp) "Connected test falls back to vpncli stats state"
+
+function Get-VpnSessionStats {
+    return @{
+        State = ""
+        ClientIP = "10.200.1.20"
+        Duration = ""
+        Remaining = ""
+        Server = ""
+    }
+}
+Assert-True (Test-VpnSessionConnected) "Session-connected fallback recognizes client IP"
+
+function Get-VpnSessionStats {
+    return @{
+        State = "Disconnected"
+        ClientIP = ""
+        Duration = ""
+        Remaining = ""
+        Server = ""
+    }
+}
+Assert-True (-not (Test-VpnSessionConnected)) "Session-connected fallback rejects disconnected state"
+Set-Item -Path function:Get-VpnSessionStats -Value $origGetVpnSessionStats
+Set-Item -Path function:Get-VpnTunnelAddress -Value $origGetVpnTunnelAddress
+
 $origGetCimInstance = $null
 if (Test-Path function:Get-CimInstance) {
     $origGetCimInstance = (Get-Item function:Get-CimInstance).ScriptBlock
