@@ -333,6 +333,36 @@ class App:
                 pass
         return None
 
+    @staticmethod
+    def _normalize_push_target(push_target):
+        digits = re.sub(r"\D", "", push_target or "")
+        if not digits:
+            return ""
+        normalized = str(int(digits))
+        return "" if normalized == "0" else normalized
+
+    @staticmethod
+    def _config_duo_method(cfg):
+        if not cfg:
+            return "push"
+        method = (cfg.get("DuoMethod") or "push").strip().lower()
+        return method if method in {"push", "phone", "passcode"} else "push"
+
+    @staticmethod
+    def _set_entry_text(entry, value):
+        entry.delete(0, "end")
+        if value:
+            entry.insert(0, value)
+            entry.config(fg=C["text"])
+            entry._placeholder_active = False
+        elif getattr(entry, "_placeholder_text", ""):
+            entry.insert(0, entry._placeholder_text)
+            entry.config(fg=C["muted"])
+            entry._placeholder_active = True
+        else:
+            entry.config(fg=C["text"])
+            entry._placeholder_active = False
+
     def _save_active_profile(self, name):
         ACTIVE_PROFILE_FILE.write_text(name)
 
@@ -437,6 +467,10 @@ class App:
         )
         self.profile_combo.pack(side="left", fill="x", expand=True)
         self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_change)
+
+        FlatButton(profile_row, "Edit", self._edit_profile,
+                   bg=C["overlay"], fg=C["text"], padx=8, pady=4
+                   ).pack(side="left", padx=(4, 0))
 
         FlatButton(profile_row, "+", self._add_profile,
                    bg=C["green"], fg=C["crust"], padx=8, pady=4
@@ -594,6 +628,7 @@ class App:
                      f"Port: {cfg.get('Port', '?')}  |  "
                      f"Protocol: {cfg.get('Protocol', '?')}"
             )
+            self.duo_var.set(self._config_duo_method(cfg))
         self.session_label.config(text="")
 
     def _on_profile_change(self, event=None):
@@ -609,14 +644,30 @@ class App:
                      f"Port: {cfg.get('Port', '?')}  |  "
                      f"Protocol: {cfg.get('Protocol', '?')}"
             )
+            self.duo_var.set(self._config_duo_method(cfg))
         self.session_label.config(text="")
         self._log(f"Switched to profile: {name}")
 
     def _add_profile(self):
-        """Interactive add profile dialog with DKU VPN preset."""
+        self._open_profile_dialog()
+
+    def _edit_profile(self):
+        display = self.profile_var.get()
+        if not display:
+            messagebox.showinfo("Edit Profile", "No profile selected.")
+            return
+        self._open_profile_dialog(profile_name=self._internal_name(display))
+
+    def _open_profile_dialog(self, profile_name=None):
+        """Interactive add/edit profile dialog with DKU VPN preset."""
+        edit_mode = bool(profile_name)
+        existing_cfg = self._load_profile_config(profile_name) if edit_mode else None
+        existing_username, has_password = self._load_profile_cred(profile_name) if edit_mode else ("", False)
+        is_dku_profile = profile_name == "dku" if edit_mode else False
+
         dlg = tk.Toplevel(self.root)
-        dlg.title("Add VPN Profile")
-        dlg.geometry("420x440")
+        dlg.title("Edit VPN Profile" if edit_mode else "Add VPN Profile")
+        dlg.geometry("420x470" if edit_mode and is_dku_profile else "420x440")
         dlg.configure(bg=C["bg"])
         dlg.resizable(False, False)
         dlg.transient(self.root)
@@ -629,7 +680,7 @@ class App:
         tk.Label(preset_frame, text="Preset", font=ui_font(9, "bold", text="Preset"),
                  bg=C["bg"], fg=C["subtext"]).pack(anchor="w")
 
-        preset_var = tk.StringVar(value="dku")
+        preset_var = tk.StringVar(value="dku" if is_dku_profile or not edit_mode else "custom")
         preset_row = tk.Frame(preset_frame, bg=C["bg"])
         preset_row.pack(fill="x", pady=(4, 0))
 
@@ -644,6 +695,8 @@ class App:
                 selectcolor=C["overlay"], activebackground=C["bg"],
                 activeforeground=C["blue"], highlightthickness=0
             )
+            if edit_mode:
+                rb.config(state="disabled")
             rb.pack(side="left", padx=(0, 16))
 
         # Separator
@@ -750,14 +803,35 @@ class App:
                 bg=C["bg"], fg=C["muted"], justify="left", wraplength=360
             ).pack(anchor="w", pady=(4, 0))
 
+        def _make_duo_row(parent):
+            row = tk.Frame(parent, bg=C["bg"])
+            row.pack(fill="x", pady=(6, 0))
+            tk.Label(row, text="DUO", font=ui_font(9, text="DUO"),
+                     bg=C["bg"], fg=C["subtext"], width=10, anchor="w").pack(side="left")
+            method_var = tk.StringVar(value="push")
+            method_row = tk.Frame(row, bg=C["bg"])
+            method_row.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            for method, label in [("push", "Push"), ("phone", "Phone"), ("passcode", "TOTP")]:
+                rb = tk.Radiobutton(
+                    method_row, text=label, variable=method_var, value=method,
+                    font=ui_font(9, text=label), bg=C["bg"], fg=C["text"],
+                    selectcolor=C["overlay"], activebackground=C["bg"],
+                    activeforeground=C["blue"], highlightthickness=0
+                )
+                rb.pack(side="left", padx=(0, 12))
+            return method_var
+
         # ===== DKU VPN form =====
         dku_form = tk.Frame(dlg, bg=C["bg"])
         dku_netid = _make_row(dku_form, "NetID", "your-netid")
         dku_password = _make_pw_row(dku_form)
         dku_group = _make_dku_group_row(dku_form)
         _make_hint(dku_form, "Choose DKU group: -Default- or Library Resources Only")
+        dku_duo_method = _make_duo_row(dku_form)
         dku_push_target = _make_row(dku_form, "PushTo", "optional: default 1")
         _make_hint(dku_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Default is 1. Enter the Cisco DUO menu number you prefer, such as 1 or 2. If you only have one approved phone, leave it blank.")
+        if edit_mode:
+            _make_hint(dku_form, "Leave Password blank to keep the current saved password.")
 
         # ===== Custom form =====
         custom_form = tk.Frame(dlg, bg=C["bg"])
@@ -768,18 +842,38 @@ class App:
         custom_port = _make_row(custom_form, "Port", "443")
         custom_protocol = _make_row(custom_form, "Protocol", "ssl")
         custom_group = _make_row(custom_form, "Group", "optional: group name")
+        custom_duo_method = _make_duo_row(custom_form)
         custom_push_target = _make_row(custom_form, "PushTo", "optional: default 1")
         _make_hint(custom_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Default is 1. Enter the Cisco DUO menu number you prefer, such as 1 or 2. If you only have one approved phone, leave it blank.")
+        if edit_mode:
+            _make_hint(custom_form, "Leave Password blank to keep the current saved password.")
+
+        if edit_mode:
+            if is_dku_profile:
+                self._set_entry_text(dku_netid, existing_username)
+                dku_group.set((existing_cfg or {}).get("Group") or "-Default-")
+                self._set_entry_text(dku_push_target, (existing_cfg or {}).get("DuoPushTarget", ""))
+                dku_duo_method.set(self._config_duo_method(existing_cfg))
+            else:
+                self._set_entry_text(custom_name, profile_name)
+                custom_name.config(state="disabled", disabledbackground=C["surface"], disabledforeground=C["muted"])
+                self._set_entry_text(custom_username, existing_username)
+                self._set_entry_text(custom_server, (existing_cfg or {}).get("Server", ""))
+                self._set_entry_text(custom_port, (existing_cfg or {}).get("Port", "443"))
+                self._set_entry_text(custom_protocol, (existing_cfg or {}).get("Protocol", "ssl"))
+                self._set_entry_text(custom_group, (existing_cfg or {}).get("Group", ""))
+                self._set_entry_text(custom_push_target, (existing_cfg or {}).get("DuoPushTarget", ""))
+                custom_duo_method.set(self._config_duo_method(existing_cfg))
 
         def toggle_preset():
             if preset_var.get() == "dku":
                 custom_form.pack_forget()
                 dku_form.pack(fill="x", padx=20, pady=(8, 0))
-                dlg.geometry("420x420")
+                dlg.geometry("420x470" if edit_mode else "420x420")
             else:
                 dku_form.pack_forget()
                 custom_form.pack(fill="x", padx=20, pady=(8, 0))
-                dlg.geometry("420x620")
+                dlg.geometry("420x670" if edit_mode else "420x620")
 
         preset_var.trace_add("write", lambda *_: toggle_preset())
         toggle_preset()
@@ -790,33 +884,39 @@ class App:
                 username = _entry_value(dku_netid)
                 password = dku_password.get().strip()
                 group = dku_group.get().strip() or "-Default-"
-                if not username or not password:
-                    messagebox.showerror("Error", "NetID and Password are required.")
+                if not username or (not password and not (edit_mode and has_password)):
+                    messagebox.showerror("Error", "NetID is required, and Password is required unless you keep the current saved password.")
                     return
                 name = "dku"
                 server = "portal.dukekunshan.edu.cn"
                 port = "443"
                 protocol = "ssl"
+                duo_method = dku_duo_method.get()
                 push_target = _entry_value(dku_push_target)
             else:
-                name = _entry_value(custom_name)
+                name = profile_name if edit_mode else _entry_value(custom_name)
                 username = _entry_value(custom_username)
                 password = custom_password.get().strip()
                 server = _entry_value(custom_server)
                 port = _entry_value(custom_port) or "443"
                 protocol = _entry_value(custom_protocol) or "ssl"
                 group = _entry_value(custom_group)
+                duo_method = custom_duo_method.get()
                 push_target = _entry_value(custom_push_target)
                 if not name:
                     messagebox.showerror("Error", "Name is required for custom profile.")
                     return
-                if not username or not password:
-                    messagebox.showerror("Error", "Username and Password are required.")
+                if not username or (not password and not (edit_mode and has_password)):
+                    messagebox.showerror("Error", "Username is required, and Password is required unless you keep the current saved password.")
                     return
                 if not server:
                     messagebox.showerror("Error", "Server is required for custom profile.")
                     return
-            self._save_profile(name, server, group, port, protocol, username, password, push_target)
+            self._save_profile(
+                name, server, group, port, protocol, username, password,
+                push_target, duo_method=duo_method, preserve_password=edit_mode and not password,
+                action="updated" if edit_mode else "added"
+            )
             dlg.destroy()
 
         # -- Buttons --
@@ -827,43 +927,58 @@ class App:
         FlatButton(btn_row, "[ Cancel ]", dlg.destroy,
                    bg=C["overlay"], fg=C["text"]).pack(side="left", padx=(8, 0))
 
-    def _save_profile(self, name, server, group, port, protocol, username, password, push_target=""):
-        """Save a profile to disk with DPAPI-encrypted credentials."""
+    def _save_profile(self, name, server, group, port, protocol, username, password,
+                      push_target="", duo_method="push", preserve_password=False, action="added"):
+        """Save or update a profile on disk."""
         profile_dir = PROFILES_DIR / name
         profile_dir.mkdir(parents=True, exist_ok=True)
 
         # Save config
-        cfg = {"Server": server, "Group": group, "Port": port, "Protocol": protocol}
-        digits = re.sub(r"\D", "", push_target or "")
-        if digits:
-            normalized = str(int(digits))
-            if normalized != "0":
-                cfg["DuoPushTarget"] = normalized
+        cfg = {
+            "Server": server,
+            "Group": group,
+            "Port": port,
+            "Protocol": protocol,
+            "DuoMethod": duo_method or "push",
+        }
+        normalized_target = self._normalize_push_target(push_target)
+        if normalized_target:
+            cfg["DuoPushTarget"] = normalized_target
         (profile_dir / "config.json").write_text(json.dumps(cfg, indent=2))
 
-        # Save credentials (call PowerShell to encrypt with DPAPI)
-        # Escape quotes in password for PowerShell
-        safe_pw = password.replace('"', '`"')
-        ps_cmd = (
-            f'Add-Type -AssemblyName System.Security; '
-            f'$bytes = [System.Text.Encoding]::UTF8.GetBytes("{safe_pw}"); '
-            f'$enc = [System.Security.Cryptography.ProtectedData]::Protect('
-            f'$bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser); '
-            f'@{{Server="{server}"; Username="{username}"; Password=[Convert]::ToBase64String($enc)}} '
-            f'| ConvertTo-Json'
-        )
-        try:
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True, text=True, timeout=10,
-                startupinfo=_startupinfo(), creationflags=_CREATION_NO_WINDOW
+        if preserve_password:
+            cred_path = profile_dir / "credentials.xml"
+            if cred_path.exists():
+                try:
+                    current_cred = json.loads(cred_path.read_text())
+                    current_cred["Server"] = server
+                    current_cred["Username"] = username
+                    cred_path.write_text(json.dumps(current_cred, indent=2))
+                except (json.JSONDecodeError, OSError):
+                    pass
+        else:
+            # Save credentials (call PowerShell to encrypt with DPAPI)
+            safe_pw = password.replace('"', '`"')
+            ps_cmd = (
+                f'Add-Type -AssemblyName System.Security; '
+                f'$bytes = [System.Text.Encoding]::UTF8.GetBytes("{safe_pw}"); '
+                f'$enc = [System.Security.Cryptography.ProtectedData]::Protect('
+                f'$bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser); '
+                f'@{{Server="{server}"; Username="{username}"; Password=[Convert]::ToBase64String($enc)}} '
+                f'| ConvertTo-Json'
             )
-            if result.returncode == 0:
-                (profile_dir / "credentials.xml").write_text(result.stdout.strip())
-            else:
+            try:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=10,
+                    startupinfo=_startupinfo(), creationflags=_CREATION_NO_WINDOW
+                )
+                if result.returncode == 0:
+                    (profile_dir / "credentials.xml").write_text(result.stdout.strip())
+                else:
+                    self._save_cred_fallback(profile_dir, server, username, password)
+            except Exception:
                 self._save_cred_fallback(profile_dir, server, username, password)
-        except Exception:
-            self._save_cred_fallback(profile_dir, server, username, password)
 
         # Update index
         index = self._load_profiles()
@@ -874,7 +989,8 @@ class App:
         self._save_active_profile(name)
         self._current_profile = name
         self._refresh_profiles()
-        self._log(f"Profile '{name}' added: {username}@{server}")
+        self.duo_var.set(self._config_duo_method(cfg))
+        self._log(f"Profile '{name}' {action}: {username}@{server}")
 
     @staticmethod
     def _save_cred_fallback(profile_dir, server, username, password):
@@ -1204,7 +1320,7 @@ if ($elapsed -lt 0 -or $elapsed -gt {SESSION_LIMIT_SECONDS}) {{ return }}
         except Exception:
             return timing
 
-    def _refresh_connected_stats(self, delay_ms=3000):
+    def _refresh_connected_stats(self, delay_ms=1500):
         def worker():
             if self._connecting or not self._connected:
                 return
@@ -1217,7 +1333,7 @@ if ($elapsed -lt 0 -or $elapsed -gt {SESSION_LIMIT_SECONDS}) {{ return }}
 
         self.root.after(delay_ms, lambda: threading.Thread(target=worker, daemon=True).start())
 
-    def _poll_vpn_ip(self, max_seconds=20, interval=2):
+    def _poll_vpn_ip(self, max_seconds=20, interval=0.5):
         deadline = time.time() + max_seconds
         while time.time() < deadline:
             ip = self._query_vpn_ip()
@@ -1302,7 +1418,7 @@ if ($elapsed -lt 0 -or $elapsed -gt {SESSION_LIMIT_SECONDS}) {{ return }}
                 if is_connect:
                     if result_marker != "CONNECTED":
                         self.root.after(0, self._log, "[..] Stage 2: polling VPN IP after process exit")
-                        ip = self._poll_vpn_ip(max_seconds=20, interval=2)
+                        ip = self._poll_vpn_ip(max_seconds=20, interval=0.5)
                     else:
                         ip = self._query_vpn_ip()
                     if ip:

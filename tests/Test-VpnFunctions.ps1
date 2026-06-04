@@ -569,13 +569,18 @@ Set-Item -Path function:Test-VpnConnectedByIp -Value $origTestVpnConnectedByIp
 $scriptText = Get-Content $ps1Path -Raw
 Assert-Match $scriptText 'Waiting for DUO approval \(up to 50s\)' "DUO wait message uses 50s"
 Assert-Match $scriptText 'Wait-ForVpnTunnelAfterMfa[\s\S]*MaxSeconds = 50' "Post-MFA tunnel wait uses 50s"
-Assert-Match $scriptText 'BannerFirstSendSeconds = 4' "Post-MFA banner confirmation starts after 4s"
+Assert-Match $scriptText 'BannerFirstSendSeconds = 2' "Post-MFA banner confirmation starts after 2s"
 Assert-Match $scriptText "StepLabel 'banner-certificate'" "Post-MFA banner/certificate y retry exists"
+Assert-Match $scriptText 'Start-Sleep -Seconds 3' "MFA pre-wait shortened to 3s"
+Assert-True ($scriptText -notmatch 'function Wait-ForDuoPushOptions') "Wait-ForDuoPushOptions helper removed"
+Assert-Match $scriptText 'Wait-ForVpnIpAfterExit -MaxSeconds 5' "Post-exit VPN IP grace shortened to 5s"
 Assert-True ($scriptText -notmatch "duo-retry") "Live connect path does not retry DUO input"
 Assert-True ($scriptText -notmatch 'sms') "PowerShell script no longer advertises sms"
-Assert-Match $scriptText 'Falling back to the default DUO push option \(1\)' "Configured push target falls back to default push when menu is unavailable"
 Assert-Match $scriptText 'menu number \(1/2/3' "PowerShell script documents push target as a menu number"
-Assert-Match $scriptText 'No vpncli MFA menu text was captured before fallback' "PowerShell script explicitly reports empty MFA capture before fallback"
+Assert-True ($scriptText -notmatch 'Could not detect the DUO push menu') "PowerShell script no longer prints push-target fallback mismatch text"
+Assert-True ($scriptText -notmatch 'No vpncli MFA menu text was captured before fallback') "PowerShell script no longer prints empty MFA capture fallback text"
+Assert-True ($scriptText -notmatch 'Falling back to the default DUO push option \(1\)') "PowerShell script no longer prints explicit fallback-to-1 text"
+Assert-True ($scriptText -notmatch 'No explicit DUO push menu detected; defaulting to option 1') "PowerShell script no longer prints generic menu-miss fallback text"
 Assert-Match $scriptText 'Stop-VpnCliForFailureAndDrain' "Failure path drains vpncli output after stopping process"
 Assert-Match $scriptText 'recent vpncli MFA buffer' "PowerShell script prints raw MFA buffer diagnostics"
 Assert-Match $scriptText 'Cisco log diagnostics' "PowerShell script prints Cisco log diagnostics"
@@ -584,6 +589,13 @@ Assert-True ($scriptText -notmatch "Please tap 'Approve' on your DUO mobile push
 $guiScript = Get-Content (Join-Path $PSScriptRoot "..\tools\vpn-gui.py") -Raw
 Assert-True ($guiScript -notmatch '"sms"|SMS') "GUI no longer offers sms"
 Assert-Match $guiScript 'VPN_RESULT=\(CONNECTED\|DISCONNECTED\|FAILED\|TIMEOUT\)' "GUI parser accepts disconnect marker"
+Assert-Match $guiScript 'optional: default 1' "GUI PushTo placeholder documents default 1"
+Assert-Match $guiScript 'delay_ms=1500' "GUI connected-stats refresh shortened to 1500ms"
+Assert-Match $guiScript 'max_seconds=20, interval=0\.5' "GUI Stage 2 VPN IP polling uses 0.5s interval"
+
+$readmeText = Get-Content (Join-Path $PSScriptRoot "..\README.md") -Raw
+Assert-True ($readmeText -notmatch 'push-target 3808|后 4 位|last 4 digits|preferred phone suffix') "README no longer documents phone-suffix push target"
+Assert-Match $readmeText 'push-target 1' "README documents push-target using DUO menu numbers"
 
 $diagNoAdapter = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @() -CiscoAddresses @() -TenAddresses @() } *>&1 | Out-String)
 Assert-Match $diagNoAdapter 'vpncli: unavailable' "Diagnostics show missing vpncli"

@@ -1821,27 +1821,9 @@ function Wait-VpnStepOrDelay {
     return 'timeout'
 }
 
-function Wait-ForDuoPushOptions {
-    param(
-        $Session,
-        [int]$MaxSeconds = 18
-    )
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
-        $text = Get-VpnSessionText -Session $Session
-        $options = @(Get-DuoPushOptions -Text $text)
-        if ($options.Count -gt 0) {
-            return $options
-        }
-        if ($Session.Process -and $Session.Process.HasExited) { break }
-        Start-Sleep -Milliseconds 250
-    }
-    return @()
-}
-
 function Wait-ForVpnIpAfterExit {
     param(
-        [int]$MaxSeconds = 20,
+        [int]$MaxSeconds = 5,
         [int]$PollMilliseconds = 300
     )
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1857,8 +1839,8 @@ function Wait-ForVpnTunnelAfterMfa {
         $Session,
         [int]$MaxSeconds = 50,
         [int]$PollMilliseconds = 300,
-        [int]$BannerFirstSendSeconds = 4,
-        [int]$ResendSeconds = 5
+        [int]$BannerFirstSendSeconds = 2,
+        [int]$ResendSeconds = 1
     )
     $proc = $Session.Process
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1867,8 +1849,8 @@ function Wait-ForVpnTunnelAfterMfa {
     while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
         if (Test-VpnConnectedByIp) { return $true }
         if ($proc -and $proc.HasExited) {
-            Write-Host "[..] vpncli exited after MFA/banner wait; checking tunnel IP for 20s..." -ForegroundColor DarkGray
-            return (Wait-ForVpnIpAfterExit -MaxSeconds 20 -PollMilliseconds $PollMilliseconds)
+            Write-Host "[..] vpncli exited after MFA/banner wait; checking tunnel IP for 5s..." -ForegroundColor DarkGray
+            return (Wait-ForVpnIpAfterExit -MaxSeconds 5 -PollMilliseconds $PollMilliseconds)
         }
         $elapsedWholeSeconds = [int][Math]::Floor($sw.Elapsed.TotalSeconds)
         if ($elapsedWholeSeconds -ge $BannerFirstSendSeconds -and
@@ -1971,27 +1953,27 @@ function Invoke-VpnConnectTimed {
 
     # Fixed delays between stdin writes (vpncli on Windows does not expose prompts on stdout).
     # After MFA input, keep banner/cert acceptance active while polling for the tunnel.
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
 
     Write-Host "[1/6] Connecting to $ConnectAddr..." -ForegroundColor Gray
     Send-VpnCliLine -Process $proc -Line "connect $ConnectAddr" -Session $Session -StepLabel 'connect'
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 3
 
     $groupSel = Get-VpnGroupSelection -Config $Config
     Write-Host "[2/6] Selecting group ($groupSel)..." -ForegroundColor Gray
     Send-VpnCliLine -Process $proc -Line $groupSel -Session $Session -StepLabel 'group'
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
 
     Write-Host "[3/6] Sending username ($($Cred.Username))..." -ForegroundColor Gray
     Send-VpnCliLine -Process $proc -Line $Cred.Username -Session $Session -StepLabel 'username'
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
 
     Write-Host "[4/6] Sending password..." -ForegroundColor Gray
     Send-VpnCliLine -Process $proc -Line $Cred.Password -Session $Session -StepLabel 'password'
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 3
 
     if ($proc.HasExited) {
-        Read-VpnCliOutputFinal -Session $Session -MaxSeconds 8
+        Read-VpnCliOutputFinal -Session $Session -MaxSeconds 5
         $outputAfterPwd = Get-VpnSessionText -Session $Session
         Write-Host "[!!] vpncli exited after password (exit $($proc.ExitCode))." -ForegroundColor Red
         Write-DuoPromptDiagnostics -Text $outputAfterPwd -MaskValues $diagnosticMaskValues
@@ -2002,39 +1984,11 @@ function Invoke-VpnConnectTimed {
     }
 
     Write-Host "[5/6] Waiting for MFA prompt..." -ForegroundColor Gray
-    Start-Sleep -Seconds 8
+    Start-Sleep -Seconds 3
 
     $duoInput = $null
     if ($EffectiveDuo -eq "push") {
-        $pushOptions = @(Wait-ForDuoPushOptions -Session $Session -MaxSeconds 12)
-        if ($pushOptions.Count -gt 0) {
-            $selectedPush = Select-DuoPushOption -Options $pushOptions -ConfiguredTarget $ConfiguredPushTarget -NonInteractive:$NonInteractiveMfa
-            if (-not $selectedPush) {
-                $selectionDiag = Get-VpnSessionText -Session $Session
-                Write-DuoPromptDiagnostics -Text $selectionDiag -MaskValues $diagnosticMaskValues
-                Write-RecentVpnMfaBuffer -Text $selectionDiag -MaskValues $diagnosticMaskValues
-                Write-CiscoLogDiagnostics -MaskValues $diagnosticMaskValues
-                return @{ Connected = $false; CertAccepted = $false; AuthFailed = $false }
-            }
-            $duoInput = $selectedPush.Number
-            Write-Host "[*] Selected DUO push option [$($selectedPush.Number)]" -ForegroundColor Gray
-        } else {
-            $duoDiagText = Get-VpnSessionText -Session $Session
-            if ($ConfiguredPushTarget) {
-                Write-Host "[!!] Could not detect the DUO push menu, so the configured push target '$ConfiguredPushTarget' could not be matched." -ForegroundColor Yellow
-                if ($duoDiagText -and $duoDiagText.Trim()) {
-                    Write-DuoPromptDiagnostics -Text $duoDiagText -MaskValues $diagnosticMaskValues
-                    Write-RecentVpnMfaBuffer -Text $duoDiagText -MaskValues $diagnosticMaskValues
-                } else {
-                    Write-Host "[..] No vpncli MFA menu text was captured before fallback; vpncli may not expose the menu on this machine." -ForegroundColor DarkGray
-                }
-                Write-Host "[..] Falling back to the default DUO push option (1)." -ForegroundColor Yellow
-            } elseif ($duoDiagText) {
-                Write-DuoPromptDiagnostics -Text $duoDiagText -MaskValues $diagnosticMaskValues
-            }
-            Write-Host "[..] No explicit DUO push menu detected; defaulting to option 1." -ForegroundColor DarkGray
-            $duoInput = Get-DuoCliInput -EffectiveDuo $EffectiveDuo
-        }
+        $duoInput = if ($ConfiguredPushTarget) { $ConfiguredPushTarget } else { Get-DuoCliInput -EffectiveDuo $EffectiveDuo }
     } else {
         $duoInput = $DuoInputFallback
     }
@@ -2054,7 +2008,7 @@ function Invoke-VpnConnectTimed {
         return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 8 -PushPath:($EffectiveDuo -eq "push") -DiagnosticMaskValues $diagnosticMaskValues
     }
 
-    $connected = Wait-ForVpnTunnelAfterMfa -Session $Session -MaxSeconds 50 -PollMilliseconds 300 -BannerFirstSendSeconds 4 -ResendSeconds 5
+    $connected = Wait-ForVpnTunnelAfterMfa -Session $Session -MaxSeconds 50 -PollMilliseconds 300 -BannerFirstSendSeconds 2 -ResendSeconds 1
 
     return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 10 -PushPath:($EffectiveDuo -eq "push") -DiagnosticMaskValues $diagnosticMaskValues
 }

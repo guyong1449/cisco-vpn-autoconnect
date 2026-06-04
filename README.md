@@ -24,7 +24,7 @@ User configuration is encrypted with Windows DPAPI.
 | One-click connect | `vpn-connect` completes login (~40s + DUO approval) |
 | GUI | `vpn-gui` or double-click `vpn-gui.bat` |
 | DUO 2FA | Push, Phone, or TOTP (passcode) |
-| Multi-phone DUO Push | Save a preferred phone suffix for accounts with multiple DUO phones |
+| Multi-phone DUO Push | Save a preferred DUO menu number for accounts with multiple DUO phones |
 | Multi-profile | `vpn-config add/use/rm/list` manage multiple VPNs |
 | TOTP full-auto | `vpn-config totp` + `vpn-connect passcode`, MFA without manual input |
 | QR secret extract | `qrgui` / `qrdecode` extract TOTP secret from images for TOTP setup (`otpauth://` QR only) |
@@ -69,8 +69,8 @@ cd cisco-vpn-autoconnect
 | **Phone** | `vpn-connect phone` | Phone call verification |
 | **Passcode** (full auto) | `vpn-connect passcode` | Auto-generate 6-digit TOTP from saved secret |
 
-If your DUO account has multiple phone numbers, you can save a preferred push target with `vpn-config set push-target 3808`.
-This field is optional. If only one phone is enrolled, leave it blank and the script will auto-select the only push option.
+If your DUO account has multiple phone numbers, you can save a preferred push target with `vpn-config set push-target 1` or `2`.
+This field is optional. Default is `1` when multiple push devices are shown. If only one phone is enrolled, leave it blank and the script will auto-select the only push option.
 
 ---
 
@@ -85,7 +85,7 @@ vpn-gui              # or double-click vpn-gui.bat
 1. Click `[+]` to add a profile, choose **DKU VPN** preset (Server / Port / Protocol prefilled)
 2. Enter NetID and Password, Group defaults to `-Default-`
 3. Save, click **Connect**, use **Configs** to view credentials and status
-4. Optional: fill **PushTo** with the last 4 digits of your preferred DUO phone only if your account has multiple DUO phones
+4. Optional: fill **PushTo** with your preferred Cisco DUO menu number only if your account has multiple DUO phones; default is `1`, and a single-phone account can leave it blank
 
 ### CLI setup
 
@@ -113,7 +113,7 @@ Password: ********
 Optional DUO push target:
 
 ```powershell
-vpn-config set push-target 3808   # Optional; mainly for multiple DUO phones
+vpn-config set push-target 1      # Optional; mainly for multiple DUO phones
 ```
 
 ---
@@ -156,7 +156,7 @@ vpn-config set port 8443                           # Port
 vpn-config set protocol ipsec                      # Protocol
 vpn-config set user newuser                        # Username and password (prompted)
 vpn-config set duo passcode                        # Default DUO method
-vpn-config set push-target 3808                    # Optional preferred DUO phone suffix
+vpn-config set push-target 1                       # Optional preferred DUO menu number
 ```
 
 ### Multi-profile example
@@ -189,7 +189,7 @@ vpn-connect
 
 - Before connect, if **Cisco GUI** (`csc_ui`), `vpnui`, or another **vpncli** blocks the session, the script ends those processes
 - After connect, run `vpn-disconnect` to disconnect, the Cisco system-tray GUI restarts when done
-- If DUO Push shows multiple `Push to ...` options, the script matches the configured phone suffix; otherwise CLI will prompt you to choose one
+- If DUO Push shows multiple `Push to ...` options, the script uses the configured DUO menu number; otherwise CLI will prompt you to choose one
 
 ---
 
@@ -306,7 +306,7 @@ Cisco Secure Client 自动连接工具，支持 DUO 2FA、多配置管理、GUI 
 | 一键连接 | `vpn-connect` 自动完成登录（约 40s + DUO 审批） |
 | GUI 界面 | `vpn-gui` 或双击 `vpn-gui.bat` |
 | DUO 双因素 | Push / Phone / TOTP（passcode）三种方式 |
-| 多手机号 DUO Push | 多个 DUO 手机号时，可保存首选手机号后 4 位 |
+| 多手机号 DUO Push | 多个 DUO 手机号时，可保存首选 DUO 菜单序号 |
 | 多配置管理 | `vpn-config add/use/rm/list` 管理多个 VPN 配置 |
 | TOTP 全自动 | `vpn-config totp` + `vpn-connect passcode`，MFA 无需手动操作 |
 | QR 提取密钥 | `qrgui` / `qrdecode` 从图片提取 TOTP 密钥，供 TOTP 配置使用（需 `otpauth://` 格式） |
@@ -351,8 +351,8 @@ cd cisco-vpn-autoconnect
 | **Phone** | `vpn-connect phone` | 电话验证 |
 | **Passcode**（全自动） | `vpn-connect passcode` | 用本地 TOTP 密钥自动生成 6 位验证码 |
 
-如果你的 DUO 账号绑定了多个手机号，可以用 `vpn-config set push-target 3808` 保存首选手机号后 4 位。
-这个字段是可选的。如果账号里只有一个已认证手机，可以留空跳过，脚本会自动选择唯一的 Push 选项。
+如果你的 DUO 账号绑定了多个手机号，可以用 `vpn-config set push-target 1` 或 `2` 保存首选 DUO 菜单序号。
+这个字段是可选的。多个设备时默认按 `1` 处理；如果账号里只有一个已认证手机，可以留空跳过，脚本会自动选择唯一的 Push 选项。
 
 ---
 
@@ -366,7 +366,7 @@ vpn-gui              # 或双击 vpn-gui.bat
 
 1. 点 `[+]` 添加配置，选 **DKU VPN** 预设（Server / Port / Protocol 已填好）
 2. 填写 NetID 和 Password，Group 默认 `-Default-`
-3. 如有多个 DUO 手机号，可选填 **PushTo** 为想使用的手机号后 4 位；若只有一个手机可留空
+3. 如有多个 DUO 手机号，可选填 **PushTo** 为想使用的 Cisco DUO 菜单序号；默认是 `1`，若只有一个手机可留空
 4. 保存后点 **Connect**，用 **Configs** 查看各配置的凭据和状态
 
 ### 命令行配置
@@ -395,7 +395,7 @@ Password: ********
 可选 DUO Push 目标：
 
 ```powershell
-vpn-config set push-target 3808   # 可选，主要用于多个 DUO 手机号的情况
+vpn-config set push-target 1      # 可选，主要用于多个 DUO 手机号的情况
 ```
 
 ---
@@ -438,7 +438,7 @@ vpn-config set port 8443                           # 修改端口
 vpn-config set protocol ipsec                      # 修改协议
 vpn-config set user newuser                        # 修改用户名和密码（会提示输入）
 vpn-config set duo passcode                        # 修改默认 DUO 方式
-vpn-config set push-target 3808                    # 可选：首选 DUO 手机号后 4 位
+vpn-config set push-target 1                       # 可选：首选 DUO 菜单序号
 ```
 
 ### 多 VPN 配置示例
@@ -470,7 +470,7 @@ vpn-connect
 
 - 连接前若 **Cisco GUI**（`csc_ui`）、`vpnui` 或其它 **vpncli** 占用连接功能，脚本会结束这些进程
 - 连接结束后执行 `vpn-disconnect` 即可断开，断开后会重启 Cisco 托盘 GUI
-- 如果 DUO Push 出现多个 `Push to ...` 选项，脚本会优先匹配已保存的手机号后 4 位；未保存时，CLI 会提示你选择
+- 如果 DUO Push 出现多个 `Push to ...` 选项，脚本会优先使用已保存的 DUO 菜单序号；未保存时，CLI 会提示你选择
 
 ---
 
