@@ -217,9 +217,9 @@ function Add-VpnProfile {
     Write-Host ""
     Write-Host "[*] Optional: DUO Push target menu number" -ForegroundColor Gray
     Write-Host "    Mainly needed when your DUO account has multiple phone numbers." -ForegroundColor DarkGray
-    Write-Host "    Enter the Cisco DUO menu number you prefer, such as 1 or 2." -ForegroundColor DarkGray
+    Write-Host "    Default is 1. Enter the Cisco DUO menu number you prefer, such as 1 or 2." -ForegroundColor DarkGray
     Write-Host "    If you only have one approved phone, leave blank and skip it." -ForegroundColor DarkGray
-    $duoPushTarget = Read-Host "  Push target number (optional, e.g. 2)"
+    $duoPushTarget = Read-Host "  Push target number (optional; default 1 for multi-phone accounts)"
     if ($duoPushTarget) { $duoPushTarget = Normalize-DuoPushTarget -Value $duoPushTarget.Trim() }
 
     Write-Host ""
@@ -475,7 +475,7 @@ function Edit-VpnProfile {
     if ($protocol) { $config.Protocol = $protocol }
 
     Write-Host "Optional: DUO push target menu number, mainly for multiple-phone accounts." -ForegroundColor DarkGray
-    Write-Host "          Enter the Cisco DUO menu number you want, such as 1 or 2." -ForegroundColor DarkGray
+    Write-Host "          Default is 1. Enter the Cisco DUO menu number you want, such as 1 or 2." -ForegroundColor DarkGray
     $pushTarget = Read-Host "New push target number (Enter to keep, '-' to clear)"
     if ($pushTarget -eq "-") {
         if ($config.PSObject.Properties.Name -contains 'DuoPushTarget') {

@@ -756,8 +756,8 @@ class App:
         dku_password = _make_pw_row(dku_form)
         dku_group = _make_dku_group_row(dku_form)
         _make_hint(dku_form, "Choose DKU group: -Default- or Library Resources Only")
-        dku_push_target = _make_row(dku_form, "PushTo", "optional: 2")
-        _make_hint(dku_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Enter the Cisco DUO menu number, such as 1 or 2. If you only have one approved phone, leave it blank.")
+        dku_push_target = _make_row(dku_form, "PushTo", "optional: default 1")
+        _make_hint(dku_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Default is 1. Enter the Cisco DUO menu number you prefer, such as 1 or 2. If you only have one approved phone, leave it blank.")
 
         # ===== Custom form =====
         custom_form = tk.Frame(dlg, bg=C["bg"])
@@ -768,8 +768,8 @@ class App:
         custom_port = _make_row(custom_form, "Port", "443")
         custom_protocol = _make_row(custom_form, "Protocol", "ssl")
         custom_group = _make_row(custom_form, "Group", "optional: group name")
-        custom_push_target = _make_row(custom_form, "PushTo", "optional: 2")
-        _make_hint(custom_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Enter the Cisco DUO menu number, such as 1 or 2. If you only have one approved phone, leave it blank.")
+        custom_push_target = _make_row(custom_form, "PushTo", "optional: default 1")
+        _make_hint(custom_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Default is 1. Enter the Cisco DUO menu number you prefer, such as 1 or 2. If you only have one approved phone, leave it blank.")
 
         def toggle_preset():
             if preset_var.get() == "dku":
