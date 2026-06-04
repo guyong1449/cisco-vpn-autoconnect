@@ -77,6 +77,14 @@ $CiscoVpnStateFiles = @(
     "$env:ProgramData\Cisco\Cisco Secure Client\VPN\routechangesv4.bin",
     "$env:ProgramData\Cisco\Cisco Secure Client\VPN\routechangesv6.bin"
 )
+$CiscoVpnLogSearchPaths = @(
+    "$env:ProgramData\Cisco\Cisco Secure Client\Logs",
+    "$env:ProgramData\Cisco\Cisco Secure Client\Log",
+    "$env:ProgramData\Cisco\Cisco Secure Client\VPN\Logs",
+    "$env:ProgramData\Cisco\Cisco Secure Client\VPN",
+    "$env:ProgramData\Cisco\Cisco AnyConnect Secure Mobility Client\Logs",
+    "$env:ProgramData\Cisco\Cisco AnyConnect Secure Mobility Client\VPN\Logs"
+)
 $VpnSessionLimitSeconds = 24 * 60 * 60
 
 # ---------- Init Directory ----------
@@ -207,10 +215,11 @@ function Add-VpnProfile {
     if (-not $protocol) { $protocol = "ssl" }
 
     Write-Host ""
-    Write-Host "[*] Optional: DUO Push target phone suffix (last 4 digits)" -ForegroundColor Gray
+    Write-Host "[*] Optional: DUO Push target menu number" -ForegroundColor Gray
     Write-Host "    Mainly needed when your DUO account has multiple phone numbers." -ForegroundColor DarkGray
+    Write-Host "    Enter the Cisco DUO menu number you prefer, such as 1 or 2." -ForegroundColor DarkGray
     Write-Host "    If you only have one approved phone, leave blank and skip it." -ForegroundColor DarkGray
-    $duoPushTarget = Read-Host "  Push target suffix (optional, e.g. 3808)"
+    $duoPushTarget = Read-Host "  Push target number (optional, e.g. 2)"
     if ($duoPushTarget) { $duoPushTarget = Normalize-DuoPushTarget -Value $duoPushTarget.Trim() }
 
     Write-Host ""
@@ -329,7 +338,7 @@ function Show-Config {
     if (-not $hasTotp) { $hasTotp = Test-Path $TotpFile }
     $totpStatus = if ($hasTotp) { "saved" } else { "not set" }
     Write-Host "TOTP Secret:    $totpStatus" -ForegroundColor $(if ($hasTotp) { "Green" } else { "Yellow" })
-    Write-Host "Push Target:    optional, mainly for multiple DUO phone numbers" -ForegroundColor DarkGray
+    Write-Host "Push Target:    optional DUO menu number for multiple-phone accounts" -ForegroundColor DarkGray
 
     Write-Host ""
 
@@ -359,7 +368,7 @@ function Show-Config {
             Write-Host "    Group:    $($cfg.Group)" -ForegroundColor Gray
             $pushTarget = if ($cfg.PSObject.Properties.Name -contains 'DuoPushTarget' -and $cfg.DuoPushTarget) { $cfg.DuoPushTarget } else { "(blank, auto)" }
             Write-Host "    PushTo:   $pushTarget" -ForegroundColor Gray
-            Write-Host "              optional; mainly for accounts with multiple DUO phones" -ForegroundColor DarkGray
+            Write-Host "              optional menu number; leave blank if only one DUO phone is enrolled" -ForegroundColor DarkGray
         } else {
             Write-Host "    (no config)" -ForegroundColor DarkGray
         }
@@ -387,7 +396,7 @@ function Show-Config {
 
     Write-Host "-------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  * = active profile" -ForegroundColor Gray
-    Write-Host "  PushTo = optional; leave blank if only one phone is enrolled in DUO" -ForegroundColor Gray
+    Write-Host "  PushTo = optional DUO menu number (1/2/3...); leave blank if only one phone is enrolled" -ForegroundColor Gray
     Write-Host ""
 }
 
@@ -465,8 +474,9 @@ function Edit-VpnProfile {
     $protocol = Read-Host "New protocol (Enter to keep)"
     if ($protocol) { $config.Protocol = $protocol }
 
-    Write-Host "Optional: DUO push target phone suffix, mainly for multiple-phone accounts." -ForegroundColor DarkGray
-    $pushTarget = Read-Host "New push target suffix (Enter to keep, '-' to clear)"
+    Write-Host "Optional: DUO push target menu number, mainly for multiple-phone accounts." -ForegroundColor DarkGray
+    Write-Host "          Enter the Cisco DUO menu number you want, such as 1 or 2." -ForegroundColor DarkGray
+    $pushTarget = Read-Host "New push target number (Enter to keep, '-' to clear)"
     if ($pushTarget -eq "-") {
         if ($config.PSObject.Properties.Name -contains 'DuoPushTarget') {
             $config.PSObject.Properties.Remove('DuoPushTarget')
@@ -474,7 +484,7 @@ function Edit-VpnProfile {
     } elseif ($pushTarget) {
         $normalizedTarget = Normalize-DuoPushTarget -Value $pushTarget.Trim()
         if (-not $normalizedTarget) {
-            Write-Host "[!!] Push target must be the last 4 digits of the DUO phone number, e.g. 3808" -ForegroundColor Red
+            Write-Host "[!!] Push target must be a Cisco DUO menu number such as 1 or 2" -ForegroundColor Red
             return
         }
         $config | Add-Member -NotePropertyName "DuoPushTarget" -NotePropertyValue $normalizedTarget -Force
@@ -578,17 +588,15 @@ function Set-VpnSetting {
                 }
                 Write-Host "[OK] DUO push target cleared ($scope)" -ForegroundColor Green
             } else {
-                $suffix = ($Value -replace '\D', '')
-                if ($suffix.Length -lt 4) {
-                    Write-Host "[!!] Push target must be the last 4 digits of the DUO phone number, e.g. 3808" -ForegroundColor Red
+                $targetNumber = Normalize-DuoPushTarget -Value $Value
+                if (-not $targetNumber) {
+                    Write-Host "[!!] Push target must be a Cisco DUO menu number such as 1 or 2" -ForegroundColor Red
                     return
                 }
-                if ($suffix.Length -gt 4) {
-                    $suffix = $suffix.Substring($suffix.Length - 4)
-                }
-                $config | Add-Member -NotePropertyName "DuoPushTarget" -NotePropertyValue $suffix -Force
-                Write-Host "[OK] DUO push target set to: $suffix ($scope)" -ForegroundColor Green
+                $config | Add-Member -NotePropertyName "DuoPushTarget" -NotePropertyValue $targetNumber -Force
+                Write-Host "[OK] DUO push target set to: $targetNumber ($scope)" -ForegroundColor Green
                 Write-Host "     Optional; mainly for accounts with multiple DUO phone numbers." -ForegroundColor Gray
+                Write-Host "     This is the Cisco DUO menu number (1/2/3...), not the phone suffix." -ForegroundColor Gray
                 Write-Host "     If only one phone is enrolled, you can leave it blank." -ForegroundColor Gray
             }
         }
@@ -823,6 +831,8 @@ function Invoke-VpnCliDisconnectQuiet {
     $psi.FileName = $VpnCliPath
     $psi.Arguments = "-s"
     $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $proc = $null
@@ -833,6 +843,15 @@ function Invoke-VpnCliDisconnectQuiet {
         $proc.StandardInput.WriteLine("exit")
         $proc.StandardInput.Flush()
         if (-not $proc.WaitForExit(5000)) { $proc.Kill() }
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        if ($env:VPN_DEBUG -eq '1') {
+            $disconnectOutput = @($stdout, $stderr) -join "`n"
+            if ($disconnectOutput.Trim()) {
+                Write-Host "--- vpncli disconnect output ---" -ForegroundColor DarkGray
+                Write-Host $disconnectOutput -ForegroundColor DarkGray
+            }
+        }
     } catch {
         if ($proc -and -not $proc.HasExited) { $proc.Kill() }
     }
@@ -971,34 +990,39 @@ function Normalize-DuoPushTarget {
     param([string]$Value)
     if (-not $Value) { return "" }
     $digits = ($Value -replace '\D', '')
-    if ($digits.Length -lt 4) { return "" }
-    if ($digits.Length -gt 4) {
-        return $digits.Substring($digits.Length - 4)
-    }
-    return $digits
+    if (-not $digits) { return "" }
+    $normalized = [int]$digits
+    if ($normalized -le 0) { return "" }
+    return [string]$normalized
 }
 
 function Get-DuoPushOptions {
     param([string]$Text)
     $options = @()
     if (-not $Text) { return $options }
-    $lines = [regex]::Split($Text, "\r?\n")
-    foreach ($line in $lines) {
-        $trimmed = $line.Trim()
-        if (-not $trimmed) { continue }
-        $match = [regex]::Match($trimmed, '^([0-9]+)\s*[-.)]\s*(.+)$')
-        if (-not $match.Success) { continue }
-        $label = $match.Groups[2].Value.Trim()
-        if ($label -notmatch 'Push') { continue }
-        $suffix = ""
-        $digitMatches = [regex]::Matches($label, '[0-9]{4}')
-        if ($digitMatches.Count -gt 0) {
-            $suffix = $digitMatches[$digitMatches.Count - 1].Value
-        }
-        $options += [pscustomobject]@{
-            Number = $match.Groups[1].Value
-            Label = $label
-            Suffix = $suffix
+    $normalized = $Text -replace "`r", ""
+    $seenNumbers = @{}
+    $patterns = @(
+        '(?im)(?:^|\n)\s*([0-9]+)\s*[-.):]\s*([^\n]*(?:Push|push|Approve|approve|Duo Push|DUO Push)[^\n]*)',
+        '(?im)(?:^|\n)\s*([0-9]+)\s+([^\n]*(?:Push|push|Approve|approve|Duo Push|DUO Push)[^\n]*)'
+    )
+    foreach ($pattern in $patterns) {
+        foreach ($match in [regex]::Matches($normalized, $pattern)) {
+            $number = $match.Groups[1].Value.Trim()
+            $label = $match.Groups[2].Value.Trim()
+            if (-not $number -or -not $label) { continue }
+            if ($seenNumbers.ContainsKey($number)) { continue }
+            $suffix = ""
+            $digitMatches = [regex]::Matches($label, '[0-9]{4}')
+            if ($digitMatches.Count -gt 0) {
+                $suffix = $digitMatches[$digitMatches.Count - 1].Value
+            }
+            $options += [pscustomobject]@{
+                Number = $number
+                Label = $label
+                Suffix = $suffix
+            }
+            $seenNumbers[$number] = $true
         }
     }
     return $options
@@ -1009,18 +1033,237 @@ function Write-DuoPushOptions {
     if (-not $Options) { return }
     Write-Host "[*] Detected DUO push options:" -ForegroundColor Yellow
     foreach ($option in $Options) {
-        $suffixInfo = ""
-        if ($option.Suffix) {
-            $suffixInfo = " (suffix {0})" -f $option.Suffix
+        Write-Host ("     [{0}] {1}" -f $option.Number, $option.Label) -ForegroundColor Gray
+    }
+}
+
+function Get-DuoPromptDiagnostics {
+    param(
+        [string]$Text,
+        [int]$MaxLines = 12,
+        [string[]]$MaskValues = @()
+    )
+    if (-not $Text) { return "" }
+
+    $lines = [regex]::Split($Text, "\r?\n") | Where-Object { $_ -and $_.Trim() }
+    if (-not $lines -or $lines.Count -eq 0) { return "" }
+
+    $interesting = @()
+    foreach ($line in $lines) {
+        if ($line -match 'Push|Phone|Passcode|Duo|DUO|MFA|Answer|答：|Approve|Call|push to|phone call|certificate|banner') {
+            $interesting += $line.Trim()
         }
-        Write-Host ("     [{0}] {1}{2}" -f $option.Number, $option.Label, $suffixInfo) -ForegroundColor Gray
+    }
+
+    if ($interesting.Count -eq 0) {
+        $interesting = @($lines | Select-Object -Last $MaxLines)
+    } elseif ($interesting.Count -gt $MaxLines) {
+        $interesting = @($interesting | Select-Object -Last $MaxLines)
+    }
+
+    return (Protect-VpnDiagnosticText -Text ($interesting -join "`n") -MaskValues $MaskValues)
+}
+
+function Write-DuoPromptDiagnostics {
+    param(
+        [string]$Text,
+        [string[]]$MaskValues = @()
+    )
+    $diag = Get-DuoPromptDiagnostics -Text $Text -MaskValues $MaskValues
+    if (-not $diag) { return }
+    Write-Host "--- DUO prompt diagnostics ---" -ForegroundColor DarkGray
+    Write-Host $diag -ForegroundColor DarkGray
+}
+
+function Get-VpnDiagnosticMaskValues {
+    param(
+        $Cred = $null,
+        [string[]]$ExtraValues = @()
+    )
+    $values = @()
+    if ($Cred) {
+        if ($Cred.Username) { $values += [string]$Cred.Username }
+        if ($Cred.Password) { $values += [string]$Cred.Password }
+    }
+    foreach ($value in @($ExtraValues)) {
+        if ($value) { $values += [string]$value }
+    }
+    return @($values | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+}
+
+function Protect-VpnDiagnosticText {
+    param(
+        [string]$Text,
+        [string[]]$MaskValues = @()
+    )
+    if (-not $Text) { return "" }
+
+    $sanitized = [string]$Text
+    foreach ($value in @($MaskValues)) {
+        if (-not $value) { continue }
+        $textValue = [string]$value
+        if (-not $textValue.Trim()) { continue }
+        $escaped = [regex]::Escape($textValue)
+        $sanitized = [regex]::Replace(
+            $sanitized,
+            $escaped,
+            '<masked>',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    }
+
+    $fullWidthColon = [regex]::Escape([string][char]0xFF1A)
+    $labelPattern = "(?im)^(\s*(?:username|user|password|passcode|otp|token|code)\s*(?::|$fullWidthColon)\s*)(.+)$"
+    $sanitized = [regex]::Replace($sanitized, $labelPattern, '$1<masked>')
+    $sanitized = [regex]::Replace(
+        $sanitized,
+        '(?<![A-Za-z0-9+/=_-])([A-Za-z0-9+/=_-]{24,})(?![A-Za-z0-9+/=_-])',
+        '<masked-token>'
+    )
+    return $sanitized
+}
+
+function Get-RecentVpnMfaBuffer {
+    param(
+        [string]$Text,
+        [int]$MaxLines = 0,
+        [string[]]$MaskValues = @()
+    )
+    if (-not $Text) { return "" }
+
+    if ($MaxLines -le 0) {
+        $MaxLines = if ($env:VPN_DEBUG -eq '1') { 30 } else { 16 }
+    }
+
+    $lines = [regex]::Split($Text, "\r?\n") | Where-Object { $_ -ne $null -and $_.Trim() -ne "" }
+    if (-not $lines -or $lines.Count -eq 0) { return "" }
+
+    $recentLines = @($lines | Select-Object -Last $MaxLines)
+    return (Protect-VpnDiagnosticText -Text ($recentLines -join "`n") -MaskValues $MaskValues)
+}
+
+function Write-RecentVpnMfaBuffer {
+    param(
+        [string]$Text,
+        [int]$MaxLines = 0,
+        [string[]]$MaskValues = @()
+    )
+    $recent = Get-RecentVpnMfaBuffer -Text $Text -MaxLines $MaxLines -MaskValues $MaskValues
+    if (-not $recent) { return }
+    Write-Host "--- recent vpncli MFA buffer ---" -ForegroundColor DarkGray
+    Write-Host $recent -ForegroundColor DarkGray
+}
+
+function Get-CiscoLogDiagnostics {
+    param(
+        [string[]]$SearchPaths = $CiscoVpnLogSearchPaths,
+        [int]$MaxFiles = 3,
+        [int]$TailLines = 12,
+        [string[]]$MaskValues = @()
+    )
+
+    $keywordPattern = '(?i)(mfa|duo|push|auth|login|certificate|failure|success|phone)'
+    $existingPaths = @($SearchPaths | Where-Object { $_ -and (Test-Path $_ -PathType Container) } | Select-Object -Unique)
+    if (-not $existingPaths -or $existingPaths.Count -eq 0) {
+        return [pscustomobject]@{
+            Status      = 'not-found'
+            SearchPaths = @($SearchPaths)
+            Files       = @()
+            Lines       = @('No Cisco text log paths found.')
+        }
+    }
+
+    $allFiles = @()
+    foreach ($path in $existingPaths) {
+        $allFiles += Get-ChildItem -Path $path -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -match '^\.(log|txt)$' }
+    }
+
+    $recentFiles = @($allFiles | Sort-Object LastWriteTime -Descending | Select-Object -First $MaxFiles)
+    if (-not $recentFiles -or $recentFiles.Count -eq 0) {
+        return [pscustomobject]@{
+            Status      = 'no-files'
+            SearchPaths = $existingPaths
+            Files       = @()
+            Lines       = @('Cisco log directories exist, but no recent .log/.txt files were found.')
+        }
+    }
+
+    $lines = @()
+    $foundKeyword = $false
+    foreach ($file in $recentFiles) {
+        $tail = @()
+        try {
+            $tail = @(Get-Content -Path $file.FullName -Tail $TailLines -ErrorAction Stop)
+        } catch {
+            $lines += ("{0} :: unreadable ({1})" -f $file.FullName, $_.Exception.Message)
+            continue
+        }
+
+        $hits = @($tail | Where-Object { $_ -match $keywordPattern })
+        if ($hits.Count -gt 0) {
+            $foundKeyword = $true
+            $lines += ("{0} :: matched MFA/auth keywords" -f $file.FullName)
+            foreach ($hit in @($hits | Select-Object -Last ([Math]::Min($hits.Count, 8)))) {
+                $lines += ("  {0}" -f $hit.Trim())
+            }
+        } else {
+            $lines += ("{0} :: no obvious MFA keywords in last {1} lines" -f $file.FullName, $TailLines)
+            foreach ($tailLine in $tail) {
+                if ($tailLine -and $tailLine.Trim()) {
+                    $lines += ("  {0}" -f $tailLine.Trim())
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Status      = if ($foundKeyword) { 'hits' } else { 'tail' }
+        SearchPaths = $existingPaths
+        Files       = @($recentFiles | ForEach-Object {
+            [pscustomobject]@{
+                FullName      = $_.FullName
+                LastWriteTime = $_.LastWriteTime
+            }
+        })
+        Lines       = @((Protect-VpnDiagnosticText -Text ($lines -join "`n") -MaskValues $MaskValues) -split "\r?\n")
+    }
+}
+
+function Write-CiscoLogDiagnostics {
+    param(
+        [string[]]$SearchPaths = $CiscoVpnLogSearchPaths,
+        [string[]]$MaskValues = @(),
+        [int]$MaxFiles = 3,
+        [int]$TailLines = 12
+    )
+    $diag = Get-CiscoLogDiagnostics -SearchPaths $SearchPaths -MaskValues $MaskValues -MaxFiles $MaxFiles -TailLines $TailLines
+    if (-not $diag) { return }
+
+    Write-Host "--- Cisco log diagnostics ---" -ForegroundColor DarkGray
+    if ($env:VPN_DEBUG -eq '1') {
+        foreach ($path in @($diag.SearchPaths)) {
+            if ($path) {
+                Write-Host ("scan path: {0}" -f $path) -ForegroundColor DarkGray
+            }
+        }
+        foreach ($file in @($diag.Files)) {
+            if ($file.FullName) {
+                Write-Host ("recent file: {0} ({1:yyyy-MM-dd HH:mm:ss})" -f $file.FullName, $file.LastWriteTime) -ForegroundColor DarkGray
+            }
+        }
+    }
+    foreach ($line in @($diag.Lines)) {
+        if ($line -and $line.Trim()) {
+            Write-Host $line -ForegroundColor DarkGray
+        }
     }
 }
 
 function Select-DuoPushOption {
     param(
         $Options,
-        [string]$ConfiguredSuffix,
+        [string]$ConfiguredTarget,
         [switch]$NonInteractive
     )
     if (-not $Options -or $Options.Count -eq 0) {
@@ -1030,25 +1273,26 @@ function Select-DuoPushOption {
         return $Options[0]
     }
 
-    $normalizedSuffix = Normalize-DuoPushTarget -Value $ConfiguredSuffix
-    if ($normalizedSuffix) {
-        $matched = @($Options | Where-Object { $_.Suffix -eq $normalizedSuffix })
+    $normalizedTarget = Normalize-DuoPushTarget -Value $ConfiguredTarget
+    if ($normalizedTarget) {
+        $matched = @($Options | Where-Object { $_.Number -eq $normalizedTarget })
         if ($matched.Count -eq 1) {
             return $matched[0]
         }
-        Write-Host "[!!] Configured DUO push target $normalizedSuffix did not match the current MFA menu." -ForegroundColor Red
+        Write-Host "[!!] Configured DUO push target number $normalizedTarget did not match the current MFA menu." -ForegroundColor Red
         Write-DuoPushOptions -Options $Options
         return $null
     }
 
     Write-DuoPushOptions -Options $Options
     if ($NonInteractive) {
-        Write-Host "[!!] Multiple DUO push targets detected. Set one with: vpn-config set push-target <last4>" -ForegroundColor Red
+        Write-Host "[!!] Multiple DUO push targets detected. Set one with: vpn-config set push-target <menu-number>" -ForegroundColor Red
         return $null
     }
 
     Write-Host "[*] Multiple DUO push targets detected." -ForegroundColor Yellow
-    Write-Host "    Optional setting: vpn-config set push-target <last4>" -ForegroundColor Gray
+    Write-Host "    Optional setting: vpn-config set push-target <menu-number>" -ForegroundColor Gray
+    Write-Host "    Use the Cisco DUO menu number, such as 1 for the first phone or 2 for the second." -ForegroundColor Gray
     Write-Host "    If you only have one approved phone on your account, you can leave this setting blank." -ForegroundColor Gray
     while ($true) {
         $choice = (Read-Host "Choose DUO push option number").Trim()
@@ -1545,7 +1789,7 @@ function Write-VpnConnectResult {
 
 function Get-VpnResultMarker {
     param(
-        [ValidateSet("CONNECTED", "FAILED", "TIMEOUT")]
+        [ValidateSet("CONNECTED", "DISCONNECTED", "FAILED", "TIMEOUT")]
         [string]$State
     )
     return "VPN_RESULT=$State"
@@ -1553,7 +1797,7 @@ function Get-VpnResultMarker {
 
 function Write-VpnResultMarker {
     param(
-        [ValidateSet("CONNECTED", "FAILED", "TIMEOUT")]
+        [ValidateSet("CONNECTED", "DISCONNECTED", "FAILED", "TIMEOUT")]
         [string]$State
     )
     Write-Host (Get-VpnResultMarker -State $State) -ForegroundColor DarkGray
@@ -1580,7 +1824,7 @@ function Wait-VpnStepOrDelay {
 function Wait-ForDuoPushOptions {
     param(
         $Session,
-        [int]$MaxSeconds = 15
+        [int]$MaxSeconds = 18
     )
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $MaxSeconds) {
@@ -1672,7 +1916,9 @@ function Complete-VpnConnectTimed {
         $Session,
         [bool]$Connected,
         [bool]$ShowCliOutput,
-        [int]$ReadSeconds = 15
+        [int]$ReadSeconds = 15,
+        [switch]$PushPath,
+        [string[]]$DiagnosticMaskValues = @()
     )
     Read-VpnCliOutputFinal -Session $Session -MaxSeconds $ReadSeconds
     $output = Get-VpnSessionText -Session $Session
@@ -1682,6 +1928,11 @@ function Complete-VpnConnectTimed {
         } else {
             Write-Host "[!!] Login failed. Update credentials: vpn-config set user <netid>" -ForegroundColor Red
         }
+        if ($PushPath) {
+            Write-DuoPromptDiagnostics -Text $output -MaskValues $DiagnosticMaskValues
+            Write-RecentVpnMfaBuffer -Text $output -MaskValues $DiagnosticMaskValues
+        }
+        Write-CiscoLogDiagnostics -MaskValues $DiagnosticMaskValues
         Write-VpnCliTail -Output $output -Force
         return @{ Connected = $false; CertAccepted = $false; AuthFailed = $true }
     }
@@ -1690,7 +1941,12 @@ function Complete-VpnConnectTimed {
     if (-not $Connected) {
         Stop-VpnCliForFailureAndDrain -Session $Session
         $output = Get-VpnSessionText -Session $Session
+        if ($PushPath) {
+            Write-DuoPromptDiagnostics -Text $output -MaskValues $DiagnosticMaskValues
+            Write-RecentVpnMfaBuffer -Text $output -MaskValues $DiagnosticMaskValues
+        }
         Write-VpnTunnelDiagnostics -Session $Session
+        Write-CiscoLogDiagnostics -MaskValues $DiagnosticMaskValues
         Write-VpnCliTail -Output $output -Force
     }
     return @{ Connected = $Connected; CertAccepted = $true; AuthFailed = $false }
@@ -1711,6 +1967,7 @@ function Invoke-VpnConnectTimed {
     )
     $proc = $Session.Process
     $connected = $false
+    $diagnosticMaskValues = Get-VpnDiagnosticMaskValues -Cred $Cred
 
     # Fixed delays between stdin writes (vpncli on Windows does not expose prompts on stdout).
     # After MFA input, keep banner/cert acceptance active while polling for the tunnel.
@@ -1737,6 +1994,9 @@ function Invoke-VpnConnectTimed {
         Read-VpnCliOutputFinal -Session $Session -MaxSeconds 8
         $outputAfterPwd = Get-VpnSessionText -Session $Session
         Write-Host "[!!] vpncli exited after password (exit $($proc.ExitCode))." -ForegroundColor Red
+        Write-DuoPromptDiagnostics -Text $outputAfterPwd -MaskValues $diagnosticMaskValues
+        Write-RecentVpnMfaBuffer -Text $outputAfterPwd -MaskValues $diagnosticMaskValues
+        Write-CiscoLogDiagnostics -MaskValues $diagnosticMaskValues
         Write-VpnCliTail -Output $outputAfterPwd -Force
         return @{ Connected = $false; CertAccepted = $false; AuthFailed = $true }
     }
@@ -1746,19 +2006,31 @@ function Invoke-VpnConnectTimed {
 
     $duoInput = $null
     if ($EffectiveDuo -eq "push") {
-        $pushOptions = @(Wait-ForDuoPushOptions -Session $Session -MaxSeconds 8)
+        $pushOptions = @(Wait-ForDuoPushOptions -Session $Session -MaxSeconds 12)
         if ($pushOptions.Count -gt 0) {
-            $selectedPush = Select-DuoPushOption -Options $pushOptions -ConfiguredSuffix $ConfiguredPushTarget -NonInteractive:$NonInteractiveMfa
+            $selectedPush = Select-DuoPushOption -Options $pushOptions -ConfiguredTarget $ConfiguredPushTarget -NonInteractive:$NonInteractiveMfa
             if (-not $selectedPush) {
+                $selectionDiag = Get-VpnSessionText -Session $Session
+                Write-DuoPromptDiagnostics -Text $selectionDiag -MaskValues $diagnosticMaskValues
+                Write-RecentVpnMfaBuffer -Text $selectionDiag -MaskValues $diagnosticMaskValues
+                Write-CiscoLogDiagnostics -MaskValues $diagnosticMaskValues
                 return @{ Connected = $false; CertAccepted = $false; AuthFailed = $false }
             }
             $duoInput = $selectedPush.Number
-            $suffixNote = if ($selectedPush.Suffix) { " suffix $($selectedPush.Suffix)" } else { "" }
-            Write-Host "[*] Selected DUO push option [$($selectedPush.Number)]$suffixNote" -ForegroundColor Gray
+            Write-Host "[*] Selected DUO push option [$($selectedPush.Number)]" -ForegroundColor Gray
         } else {
+            $duoDiagText = Get-VpnSessionText -Session $Session
             if ($ConfiguredPushTarget) {
-                Write-Host "[!!] Could not detect the DUO push menu, so the configured push target '$ConfiguredPushTarget' could not be matched." -ForegroundColor Red
-                return @{ Connected = $false; CertAccepted = $false; AuthFailed = $false }
+                Write-Host "[!!] Could not detect the DUO push menu, so the configured push target '$ConfiguredPushTarget' could not be matched." -ForegroundColor Yellow
+                if ($duoDiagText -and $duoDiagText.Trim()) {
+                    Write-DuoPromptDiagnostics -Text $duoDiagText -MaskValues $diagnosticMaskValues
+                    Write-RecentVpnMfaBuffer -Text $duoDiagText -MaskValues $diagnosticMaskValues
+                } else {
+                    Write-Host "[..] No vpncli MFA menu text was captured before fallback; vpncli may not expose the menu on this machine." -ForegroundColor DarkGray
+                }
+                Write-Host "[..] Falling back to the default DUO push option (1)." -ForegroundColor Yellow
+            } elseif ($duoDiagText) {
+                Write-DuoPromptDiagnostics -Text $duoDiagText -MaskValues $diagnosticMaskValues
             }
             Write-Host "[..] No explicit DUO push menu detected; defaulting to option 1." -ForegroundColor DarkGray
             $duoInput = Get-DuoCliInput -EffectiveDuo $EffectiveDuo
@@ -1770,24 +2042,21 @@ function Invoke-VpnConnectTimed {
     Write-Host "[5/6] Sending DUO option ($DuoInput)..." -ForegroundColor Gray
     Send-VpnCliLine -Process $proc -Line $DuoInput -Session $Session -StepLabel 'duo'
 
-    if ($EffectiveDuo -eq "push") {
-        Write-Host "[>>] Please tap 'Approve' on your DUO mobile push" -ForegroundColor Yellow
-    }
     if ($EffectiveDuo -ne "passcode") {
         Write-Host "[>>] Waiting for DUO approval (up to 50s)..." -ForegroundColor Yellow
     }
 
     if ($connected -or (Test-VpnConnectedByIp)) {
-        return Complete-VpnConnectTimed -Session $Session -Connected $true -ShowCliOutput $ShowCliOutput -ReadSeconds 6
+        return Complete-VpnConnectTimed -Session $Session -Connected $true -ShowCliOutput $ShowCliOutput -ReadSeconds 6 -PushPath:($EffectiveDuo -eq "push") -DiagnosticMaskValues $diagnosticMaskValues
     }
 
     if ($proc.HasExited) {
-        return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 8
+        return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 8 -PushPath:($EffectiveDuo -eq "push") -DiagnosticMaskValues $diagnosticMaskValues
     }
 
     $connected = Wait-ForVpnTunnelAfterMfa -Session $Session -MaxSeconds 50 -PollMilliseconds 300 -BannerFirstSendSeconds 4 -ResendSeconds 5
 
-    return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 10
+    return Complete-VpnConnectTimed -Session $Session -Connected $connected -ShowCliOutput $ShowCliOutput -ReadSeconds 10 -PushPath:($EffectiveDuo -eq "push") -DiagnosticMaskValues $diagnosticMaskValues
 }
 
 # Invoke-VpnConnectPrompted removed: vpncli does not expose prompts on redirected stdout (Windows).
@@ -1859,7 +2128,7 @@ function Connect-Vpn {
     Write-Host "     DUO method: $effectiveDuo" -ForegroundColor Gray
     $configuredPushTarget = Normalize-DuoPushTarget -Value $config.DuoPushTarget
     if ($configuredPushTarget) {
-        Write-Host "     Push target: $configuredPushTarget" -ForegroundColor Gray
+        Write-Host "     Push target: menu $configuredPushTarget" -ForegroundColor Gray
     } elseif ($effectiveDuo -eq "push") {
         Write-Host "     Push target: (blank, auto; optional if only one DUO phone)" -ForegroundColor DarkGray
     }
@@ -1891,9 +2160,6 @@ function Connect-Vpn {
     if ($showCliOutput) {
         Write-Host "[*] VPN_DEBUG: vpncli log prints after steps complete (mid-connect read would block)." -ForegroundColor DarkGray
     }
-    if ($effectiveDuo -eq "push") {
-        Write-Host "[>>] Please tap 'Approve' on your DUO mobile push when prompted" -ForegroundColor Yellow
-    }
 
     $connectAddr = $server
     if ($config.Port -and $config.Port -ne "443") {
@@ -1922,9 +2188,13 @@ function Connect-Vpn {
     } catch {
         $errorText = $_.Exception.Message
         if (-not $errorText) { $errorText = "$_" }
+        $diagnosticMaskValues = Get-VpnDiagnosticMaskValues -Cred $cred
         if ($session -and $errorText -match 'vpncli exited before stdin write \(group\)') {
             Read-VpnCliOutputFinal -Session $session -MaxSeconds 3
             $earlyOutput = Get-VpnSessionText -Session $session
+            Write-DuoPromptDiagnostics -Text $earlyOutput -MaskValues $diagnosticMaskValues
+            Write-RecentVpnMfaBuffer -Text $earlyOutput -MaskValues $diagnosticMaskValues
+            Write-CiscoLogDiagnostics -MaskValues $diagnosticMaskValues
             Write-VpnCliTail -Output $earlyOutput -Force
             Write-Host "[!!] vpncli could not reach the server. Check: network, DNS, vpnagent service." -ForegroundColor Red
         }
@@ -1951,12 +2221,15 @@ function Disconnect-Vpn {
     Invoke-VpnCliDisconnectQuiet
     & taskkill.exe /IM vpncli.exe /F /T 2>$null | Out-Null
     Write-Host "[OK] Disconnected" -ForegroundColor Green
+    Write-VpnResultMarker -State DISCONNECTED
 
     # Restart GUI client if it was killed during connect
     $guiPath = "C:\Program Files (x86)\Cisco\Cisco Secure Client\csc_ui.exe"
     if (Test-Path $guiPath) {
         Start-Process $guiPath
-        Write-Host "[*] GUI client restarted" -ForegroundColor Gray
+        if ($env:VPN_DEBUG -eq '1') {
+            Write-Host "[*] GUI client restarted" -ForegroundColor Gray
+        }
     }
 }
 

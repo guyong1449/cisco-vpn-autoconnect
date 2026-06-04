@@ -289,6 +289,7 @@ Assert-True (-not (Test-SupportedDuoMethod -Method "sms")) "sms is no longer a s
 
 # GUI result markers
 Assert-Equal (Get-VpnResultMarker -State "CONNECTED") "VPN_RESULT=CONNECTED" "Connected marker format"
+Assert-Equal (Get-VpnResultMarker -State "DISCONNECTED") "VPN_RESULT=DISCONNECTED" "Disconnected marker format"
 Assert-Equal (Get-VpnResultMarker -State "FAILED") "VPN_RESULT=FAILED" "Failed marker format"
 Assert-Equal (Get-VpnResultMarker -State "TIMEOUT") "VPN_RESULT=TIMEOUT" "Timeout marker format"
 
@@ -337,7 +338,7 @@ $origGetVpnTunnelAddress = ${function:Get-VpnTunnelAddress}
 Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Unknown"; ClientIP = "10.200.1.20" } -Tunnel $null) "Connected" "Display state overrides Unknown when client IP exists"
 Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Unknown"; ClientIP = "" } -Tunnel ([pscustomobject]@{ IPAddress = "10.200.1.20" })) "Connected" "Display state overrides Unknown when tunnel exists"
 Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Disconnected"; ClientIP = "" } -Tunnel $null) "Disconnected" "Display state preserves non-Unknown state"
-Assert-Equal (Normalize-DuoPushTarget -Value "xxx-3808") "3808" "Push target normalizes to last 4 digits"
+Assert-Equal (Normalize-DuoPushTarget -Value "option 02") "2" "Push target normalizes to a DUO menu number"
 
 $pushText = @"
 1-Push to XXX-3808
@@ -348,18 +349,94 @@ $pushOptions = @(Get-DuoPushOptions -Text $pushText)
 Assert-Equal $pushOptions.Count 2 "Push option parser finds multiple push entries"
 Assert-Equal $pushOptions[0].Number "1" "First push option keeps menu number"
 Assert-Equal $pushOptions[1].Suffix "4123" "Push option parser extracts suffix"
-$selectedBySuffix = Select-DuoPushOption -Options $pushOptions -ConfiguredSuffix "4123" -NonInteractive
-Assert-Equal $selectedBySuffix.Number "2" "Push option selector matches configured suffix"
+$selectedByNumber = Select-DuoPushOption -Options $pushOptions -ConfiguredTarget "2" -NonInteractive
+Assert-Equal $selectedByNumber.Number "2" "Push option selector matches configured DUO menu number"
 $singlePush = @(Get-DuoPushOptions -Text "1-Push to XXX-3808")
-Assert-Equal (Select-DuoPushOption -Options $singlePush -ConfiguredSuffix "" -NonInteractive).Number "1" "Single push option auto-selects"
+Assert-Equal (Select-DuoPushOption -Options $singlePush -ConfiguredTarget "" -NonInteractive).Number "1" "Single push option auto-selects"
 
-$missingSuffixOutput = (& { Select-DuoPushOption -Options $pushOptions -ConfiguredSuffix "9999" -NonInteractive } *>&1 | Out-String)
-Assert-Match $missingSuffixOutput 'did not match' "Missing configured push suffix reports a clear error"
-Assert-Match $missingSuffixOutput 'Detected DUO push options' "Missing configured push suffix prints detected options"
+$pushTextAlt = @"
+1) Duo Push to XXX-3808
+2) Duo Push to XXX-4123
+"@
+$pushOptionsAlt = @(Get-DuoPushOptions -Text $pushTextAlt)
+Assert-Equal $pushOptionsAlt.Count 2 "Push option parser handles alternate menu punctuation"
+Assert-Equal $pushOptionsAlt[0].Suffix "3808" "Push option parser keeps suffix from alternate format"
 
-$multiNonInteractiveOutput = (& { Select-DuoPushOption -Options $pushOptions -ConfiguredSuffix "" -NonInteractive } *>&1 | Out-String)
+$missingTargetOutput = (& { Select-DuoPushOption -Options $pushOptions -ConfiguredTarget "9" -NonInteractive } *>&1 | Out-String)
+Assert-Match $missingTargetOutput 'did not match' "Missing configured push number reports a clear error"
+Assert-Match $missingTargetOutput 'Detected DUO push options' "Missing configured push number prints detected options"
+
+$multiNonInteractiveOutput = (& { Select-DuoPushOption -Options $pushOptions -ConfiguredTarget "" -NonInteractive } *>&1 | Out-String)
 Assert-Match $multiNonInteractiveOutput 'Multiple DUO push targets detected' "Multiple push targets without config fail in non-interactive mode"
 Assert-Match $multiNonInteractiveOutput 'vpn-config set push-target' "Non-interactive failure suggests push-target config"
+
+$duoDiag = Get-DuoPromptDiagnostics -Text @"
+Header
+1-Push to XXX-3808
+2-Phone call
+Footer
+"@
+Assert-Match $duoDiag 'Push to XXX-3808' "DUO diagnostics keep push lines"
+Assert-Match $duoDiag 'Phone call' "DUO diagnostics keep related MFA lines"
+
+$rawMfaBuffer = Get-RecentVpnMfaBuffer -Text @"
+Header
+username: rw335
+1-Push to XXX-3808
+Token: ABCDEFGHIJKLMNOPQRSTUVWXYZ123456
+Footer
+"@ -MaxLines 4 -MaskValues @("rw335")
+Assert-Match $rawMfaBuffer '1-Push to XXX-3808' "Recent MFA buffer keeps menu lines"
+Assert-Match $rawMfaBuffer '<masked>' "Recent MFA buffer masks known secrets"
+Assert-Match $rawMfaBuffer 'Token: <masked>|<masked-token>' "Recent MFA buffer masks sensitive token output"
+
+$duoDiagSanitized = Get-DuoPromptDiagnostics -Text @"
+User: rw335
+Push to XXX-3808
+"@ -MaskValues @("rw335")
+Assert-Match $duoDiagSanitized 'Push to XXX-3808' "Sanitized DUO diagnostics still keep menu text"
+$protectedText = Protect-VpnDiagnosticText -Text "User: rw335" -MaskValues @("rw335")
+Assert-Match $protectedText '<masked>' "Diagnostic text masking hides the username"
+
+$logHitDir = Join-Path $env:TEMP "vpn-log-hit-$(Get-Random)"
+$logTailDir = Join-Path $env:TEMP "vpn-log-tail-$(Get-Random)"
+try {
+    New-Item -ItemType Directory -Path $logHitDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $logTailDir -Force | Out-Null
+
+    $hitLog = Join-Path $logHitDir "vpn-hit.log"
+    @(
+        "normal line"
+        "DUO push request sent to user rw335"
+        "authentication success"
+    ) | Set-Content $hitLog
+    $hitDiag = Get-CiscoLogDiagnostics -SearchPaths @($logHitDir) -MaxFiles 1 -TailLines 6 -MaskValues @("rw335")
+    $hitText = $hitDiag.Lines -join "`n"
+    Assert-Equal $hitDiag.Status "hits" "Cisco log diagnostics report keyword hits"
+    Assert-Match $hitText 'matched MFA/auth keywords' "Cisco log diagnostics mention keyword matches"
+    Assert-Match $hitText '<masked>' "Cisco log diagnostics mask configured secrets"
+
+    $tailLog = Join-Path $logTailDir "vpn-tail.log"
+    @(
+        "line one"
+        "line two"
+        "line three"
+    ) | Set-Content $tailLog
+    $tailDiag = Get-CiscoLogDiagnostics -SearchPaths @($logTailDir) -MaxFiles 1 -TailLines 3
+    $tailText = $tailDiag.Lines -join "`n"
+    Assert-Equal $tailDiag.Status "tail" "Cisco log diagnostics fall back to raw tail lines"
+    Assert-Match $tailText 'no obvious MFA keywords' "Cisco log diagnostics explain missing keywords"
+    Assert-Match $tailText 'line three' "Cisco log diagnostics include raw tail fallback"
+
+    $notFoundDiag = Get-CiscoLogDiagnostics -SearchPaths @(Join-Path $env:TEMP "vpn-log-missing-$(Get-Random)") -MaxFiles 1 -TailLines 3
+    $notFoundText = $notFoundDiag.Lines -join "`n"
+    Assert-Equal $notFoundDiag.Status "not-found" "Cisco log diagnostics report missing directories"
+    Assert-Match $notFoundText 'No Cisco text log paths found' "Cisco log diagnostics clearly report missing paths"
+} finally {
+    Remove-Item $logHitDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $logTailDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 function Get-VpnSessionStats {
     return @{
         State = "Connected"
@@ -496,10 +573,17 @@ Assert-Match $scriptText 'BannerFirstSendSeconds = 4' "Post-MFA banner confirmat
 Assert-Match $scriptText "StepLabel 'banner-certificate'" "Post-MFA banner/certificate y retry exists"
 Assert-True ($scriptText -notmatch "duo-retry") "Live connect path does not retry DUO input"
 Assert-True ($scriptText -notmatch 'sms') "PowerShell script no longer advertises sms"
+Assert-Match $scriptText 'Falling back to the default DUO push option \(1\)' "Configured push target falls back to default push when menu is unavailable"
+Assert-Match $scriptText 'menu number \(1/2/3' "PowerShell script documents push target as a menu number"
+Assert-Match $scriptText 'No vpncli MFA menu text was captured before fallback' "PowerShell script explicitly reports empty MFA capture before fallback"
 Assert-Match $scriptText 'Stop-VpnCliForFailureAndDrain' "Failure path drains vpncli output after stopping process"
+Assert-Match $scriptText 'recent vpncli MFA buffer' "PowerShell script prints raw MFA buffer diagnostics"
+Assert-Match $scriptText 'Cisco log diagnostics' "PowerShell script prints Cisco log diagnostics"
+Assert-True ($scriptText -notmatch "Please tap 'Approve' on your DUO mobile push") "PowerShell script no longer prints duplicate push approval reminder"
 
 $guiScript = Get-Content (Join-Path $PSScriptRoot "..\tools\vpn-gui.py") -Raw
 Assert-True ($guiScript -notmatch '"sms"|SMS') "GUI no longer offers sms"
+Assert-Match $guiScript 'VPN_RESULT=\(CONNECTED\|DISCONNECTED\|FAILED\|TIMEOUT\)' "GUI parser accepts disconnect marker"
 
 $diagNoAdapter = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @() -CiscoAddresses @() -TenAddresses @() } *>&1 | Out-String)
 Assert-Match $diagNoAdapter 'vpncli: unavailable' "Diagnostics show missing vpncli"

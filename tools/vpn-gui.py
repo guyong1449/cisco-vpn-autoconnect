@@ -756,8 +756,8 @@ class App:
         dku_password = _make_pw_row(dku_form)
         dku_group = _make_dku_group_row(dku_form)
         _make_hint(dku_form, "Choose DKU group: -Default- or Library Resources Only")
-        dku_push_target = _make_row(dku_form, "PushTo", "optional: 1234")
-        _make_hint(dku_form, "Optional. Mainly for accounts with multiple DUO phone numbers. If you only have one approved phone, leave it blank.")
+        dku_push_target = _make_row(dku_form, "PushTo", "optional: 2")
+        _make_hint(dku_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Enter the Cisco DUO menu number, such as 1 or 2. If you only have one approved phone, leave it blank.")
 
         # ===== Custom form =====
         custom_form = tk.Frame(dlg, bg=C["bg"])
@@ -768,8 +768,8 @@ class App:
         custom_port = _make_row(custom_form, "Port", "443")
         custom_protocol = _make_row(custom_form, "Protocol", "ssl")
         custom_group = _make_row(custom_form, "Group", "optional: group name")
-        custom_push_target = _make_row(custom_form, "PushTo", "optional: 1234")
-        _make_hint(custom_form, "Optional. Mainly for accounts with multiple DUO phone numbers. If you only have one approved phone, leave it blank.")
+        custom_push_target = _make_row(custom_form, "PushTo", "optional: 2")
+        _make_hint(custom_form, "Optional. Mainly for accounts with multiple DUO phone numbers. Enter the Cisco DUO menu number, such as 1 or 2. If you only have one approved phone, leave it blank.")
 
         def toggle_preset():
             if preset_var.get() == "dku":
@@ -835,8 +835,10 @@ class App:
         # Save config
         cfg = {"Server": server, "Group": group, "Port": port, "Protocol": protocol}
         digits = re.sub(r"\D", "", push_target or "")
-        if len(digits) >= 4:
-            cfg["DuoPushTarget"] = digits[-4:]
+        if digits:
+            normalized = str(int(digits))
+            if normalized != "0":
+                cfg["DuoPushTarget"] = normalized
         (profile_dir / "config.json").write_text(json.dumps(cfg, indent=2))
 
         # Save credentials (call PowerShell to encrypt with DPAPI)
@@ -969,7 +971,7 @@ class App:
                 text_area.insert("end", f"    Port:     {cfg.get('Port', '-')}\n")
                 text_area.insert("end", f"    Protocol: {cfg.get('Protocol', '-')}\n")
                 text_area.insert("end", f"    Group:    {cfg.get('Group', '-')}\n")
-                text_area.insert("end", f"    PushTo:   {cfg.get('DuoPushTarget', '(blank, auto)')}\n")
+                text_area.insert("end", f"    PushTo:   {cfg.get('DuoPushTarget', '(blank, auto menu)')}\n")
             else:
                 text_area.insert("end", "    (no config found)\n")
             text_area.insert("end", "\n")
@@ -1226,7 +1228,7 @@ if ($elapsed -lt 0 -or $elapsed -gt {SESSION_LIMIT_SECONDS}) {{ return }}
 
     @staticmethod
     def _parse_vpn_result(output):
-        match = re.search(r"VPN_RESULT=(CONNECTED|FAILED|TIMEOUT)", output)
+        match = re.search(r"VPN_RESULT=(CONNECTED|DISCONNECTED|FAILED|TIMEOUT)", output)
         return match.group(1) if match else ""
 
     def _stream_process(self, cmd, timeout):
