@@ -22,7 +22,6 @@ User configuration is encrypted with Windows DPAPI.
 | Feature | Description |
 |---|---|
 | One-click connect | `vpn-connect` completes login (~40s + DUO approval) |
-| Quick settings | `vpn-config set <key> <value>` change one field |
 | GUI | `vpn-gui` or double-click `vpn-gui.bat` |
 | DUO 2FA | Push, Phone, or TOTP (passcode) |
 | Multi-phone DUO Push | Save a preferred phone suffix for accounts with multiple DUO phones |
@@ -30,7 +29,7 @@ User configuration is encrypted with Windows DPAPI.
 | TOTP full-auto | `vpn-config totp` + `vpn-connect passcode`, MFA without manual input |
 | QR secret extract | `qrgui` / `qrdecode` extract TOTP secret from images for TOTP setup (`otpauth://` QR only) |
 | Secure storage | Windows DPAPI encrypted credentials |
-| Public IP check | GUI `[ ip.me ]` opens the browser to verify your current public IP |
+| Public IP check | GUI icon `[ ip.me ]` opens the browser to verify your current public IP |
 
 ---
 
@@ -305,7 +304,6 @@ Cisco Secure Client 自动连接工具，支持 DUO 2FA、多配置管理、GUI 
 | 功能 | 说明 |
 |---|---|
 | 一键连接 | `vpn-connect` 自动完成登录（约 40s + DUO 审批） |
-| 快速设置 | `vpn-config set <key> <value>` 单项修改 |
 | GUI 界面 | `vpn-gui` 或双击 `vpn-gui.bat` |
 | DUO 双因素 | Push / Phone / TOTP（passcode）三种方式 |
 | 多手机号 DUO Push | 多个 DUO 手机号时，可保存首选手机号后 4 位 |
@@ -313,7 +311,7 @@ Cisco Secure Client 自动连接工具，支持 DUO 2FA、多配置管理、GUI 
 | TOTP 全自动 | `vpn-config totp` + `vpn-connect passcode`，MFA 无需手动操作 |
 | QR 提取密钥 | `qrgui` / `qrdecode` 从图片提取 TOTP 密钥，供 TOTP 配置使用（需 `otpauth://` 格式） |
 | 安全存储 | Windows DPAPI 加密凭据 |
-| 公网 IP 检查 | GUI 里的 `[ ip.me ]` 会打开浏览器验证当前公网 IP |
+| 公网 IP 检查 | 点击 GUI按钮 `[ ip.me ]` 跳转浏览器, 验证当前公网 IP |
 
 ---
 

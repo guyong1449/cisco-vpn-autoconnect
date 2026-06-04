@@ -663,7 +663,43 @@ class App:
             if show:
                 entry.config(show=show)
             entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            entry._placeholder_text = placeholder or ""
+            entry._placeholder_active = False
+            if placeholder:
+                entry.insert(0, placeholder)
+                entry.config(fg=C["muted"])
+                entry._placeholder_active = True
+
+                def _on_focus_in(e, ent=entry):
+                    if getattr(ent, "_placeholder_active", False):
+                        ent.selection_range(0, "end")
+                        ent.icursor("end")
+
+                def _on_keypress(e, ent=entry):
+                    if not getattr(ent, "_placeholder_active", False):
+                        return None
+                    if len(e.keysym) == 1 or e.keysym in ("BackSpace", "Delete"):
+                        ent.delete(0, "end")
+                        ent.config(fg=C["text"])
+                        ent._placeholder_active = False
+                    return None
+
+                def _on_focus_out(e, ent=entry, ph=placeholder):
+                    if not ent.get().strip():
+                        ent.delete(0, "end")
+                        ent.insert(0, ph)
+                        ent.config(fg=C["muted"])
+                        ent._placeholder_active = True
+
+                entry.bind("<FocusIn>", _on_focus_in)
+                entry.bind("<KeyPress>", _on_keypress)
+                entry.bind("<FocusOut>", _on_focus_out)
             return entry
+
+        def _entry_value(entry):
+            if getattr(entry, "_placeholder_active", False):
+                return ""
+            return entry.get().strip()
 
         def _make_pw_row(parent, label="Password"):
             row = tk.Frame(parent, bg=C["bg"])
@@ -716,32 +752,23 @@ class App:
 
         # ===== DKU VPN form =====
         dku_form = tk.Frame(dlg, bg=C["bg"])
-        dku_netid = _make_row(dku_form, "NetID")
-        _make_hint(dku_form, "Example: your-netid")
+        dku_netid = _make_row(dku_form, "NetID", "your-netid")
         dku_password = _make_pw_row(dku_form)
         dku_group = _make_dku_group_row(dku_form)
         _make_hint(dku_form, "Choose DKU group: -Default- or Library Resources Only")
-        dku_push_target = _make_row(dku_form, "PushTo")
-        _make_hint(dku_form, "Optional example: 1234")
+        dku_push_target = _make_row(dku_form, "PushTo", "optional: 1234")
         _make_hint(dku_form, "Optional. Mainly for accounts with multiple DUO phone numbers. If you only have one approved phone, leave it blank.")
 
         # ===== Custom form =====
         custom_form = tk.Frame(dlg, bg=C["bg"])
-        custom_name = _make_row(custom_form, "Name")
-        _make_hint(custom_form, "Example: my-vpn")
-        custom_username = _make_row(custom_form, "Username")
-        _make_hint(custom_form, "Example: username")
+        custom_name = _make_row(custom_form, "Name", "my-vpn")
+        custom_username = _make_row(custom_form, "Username", "username")
         custom_password = _make_pw_row(custom_form)
-        custom_server = _make_row(custom_form, "Server")
-        _make_hint(custom_form, "Example: vpn.example.com")
-        custom_port = _make_row(custom_form, "Port")
-        _make_hint(custom_form, "Optional example: 443")
-        custom_protocol = _make_row(custom_form, "Protocol")
-        _make_hint(custom_form, "Optional example: ssl")
-        custom_group = _make_row(custom_form, "Group")
-        _make_hint(custom_form, "Optional. Leave blank if this VPN does not require a group.")
-        custom_push_target = _make_row(custom_form, "PushTo")
-        _make_hint(custom_form, "Optional example: 1234")
+        custom_server = _make_row(custom_form, "Server", "vpn.example.com")
+        custom_port = _make_row(custom_form, "Port", "443")
+        custom_protocol = _make_row(custom_form, "Protocol", "ssl")
+        custom_group = _make_row(custom_form, "Group", "optional: group name")
+        custom_push_target = _make_row(custom_form, "PushTo", "optional: 1234")
         _make_hint(custom_form, "Optional. Mainly for accounts with multiple DUO phone numbers. If you only have one approved phone, leave it blank.")
 
         def toggle_preset():
@@ -760,7 +787,7 @@ class App:
         # -- Save logic --
         def on_save():
             if preset_var.get() == "dku":
-                username = dku_netid.get().strip()
+                username = _entry_value(dku_netid)
                 password = dku_password.get().strip()
                 group = dku_group.get().strip() or "-Default-"
                 if not username or not password:
@@ -770,16 +797,16 @@ class App:
                 server = "portal.dukekunshan.edu.cn"
                 port = "443"
                 protocol = "ssl"
-                push_target = dku_push_target.get().strip()
+                push_target = _entry_value(dku_push_target)
             else:
-                name = custom_name.get().strip()
-                username = custom_username.get().strip()
+                name = _entry_value(custom_name)
+                username = _entry_value(custom_username)
                 password = custom_password.get().strip()
-                server = custom_server.get().strip()
-                port = custom_port.get().strip() or "443"
-                protocol = custom_protocol.get().strip() or "ssl"
-                group = custom_group.get().strip()
-                push_target = custom_push_target.get().strip()
+                server = _entry_value(custom_server)
+                port = _entry_value(custom_port) or "443"
+                protocol = _entry_value(custom_protocol) or "ssl"
+                group = _entry_value(custom_group)
+                push_target = _entry_value(custom_push_target)
                 if not name:
                     messagebox.showerror("Error", "Name is required for custom profile.")
                     return
