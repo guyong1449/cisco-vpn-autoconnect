@@ -597,7 +597,7 @@ $readmeText = Get-Content (Join-Path $PSScriptRoot "..\README.md") -Raw
 Assert-True ($readmeText -notmatch 'push-target 3808|后 4 位|last 4 digits|preferred phone suffix') "README no longer documents phone-suffix push target"
 Assert-Match $readmeText 'push-target 1' "README documents push-target using DUO menu numbers"
 
-$diagNoAdapter = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @() -CiscoAddresses @() -TenAddresses @() } *>&1 | Out-String)
+$diagNoAdapter = Get-VpnTunnelDiagnosticsText -CiscoAdapters @() -CiscoAddresses @() -TenAddresses @()
 Assert-Match $diagNoAdapter 'vpncli: unavailable' "Diagnostics show missing vpncli"
 Assert-Match $diagNoAdapter 'Cisco adapter: not found' "Diagnostics show no Cisco adapter"
 Assert-Match $diagNoAdapter '10\.x IPv4: none' "Diagnostics show no 10.x address"
@@ -607,7 +607,7 @@ $disabledAdapter = [pscustomobject]@{
     Status = "Disabled"
     InterfaceDescription = "Cisco AnyConnect Virtual Miniport Adapter for Windows x64"
 }
-$diagDisabled = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @($disabledAdapter) -CiscoAddresses @() -TenAddresses @() } *>&1 | Out-String)
+$diagDisabled = Get-VpnTunnelDiagnosticsText -CiscoAdapters @($disabledAdapter) -CiscoAddresses @() -TenAddresses @()
 Assert-Match $diagDisabled 'Cisco adapter: .*Disabled.*Cisco AnyConnect' "Diagnostics show disabled Cisco adapter"
 Assert-Match $diagDisabled 'Cisco IPv4: none' "Diagnostics show disabled adapter has no IPv4"
 
@@ -617,7 +617,7 @@ $upAdapter = [pscustomobject]@{
     InterfaceDescription = "Cisco Secure Client Virtual Adapter"
 }
 $ciscoAddr = [pscustomobject]@{ IPAddress = "10.200.1.20" }
-$diagUp = (& { Write-VpnTunnelDiagnostics -CiscoAdapters @($upAdapter) -CiscoAddresses @($ciscoAddr) -TenAddresses @($ciscoAddr) } *>&1 | Out-String)
+$diagUp = Get-VpnTunnelDiagnosticsText -CiscoAdapters @($upAdapter) -CiscoAddresses @($ciscoAddr) -TenAddresses @($ciscoAddr)
 Assert-Match $diagUp 'Cisco adapter: .*Up.*Cisco Secure Client' "Diagnostics show up Cisco adapter"
 Assert-Match $diagUp 'Cisco IPv4: 10\.200\.1\.20' "Diagnostics show Cisco IPv4"
 

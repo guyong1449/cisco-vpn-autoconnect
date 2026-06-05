@@ -86,12 +86,17 @@ $CiscoVpnLogSearchPaths = @(
     "$env:ProgramData\Cisco\Cisco AnyConnect Secure Mobility Client\VPN\Logs"
 )
 $VpnSessionLimitSeconds = 24 * 60 * 60
+$VpnDiagnosticLogDir = Join-Path $ConfigDir 'logs'
+$script:VpnDiagnosticLogPath = $null
 
 # ---------- Init Directory ----------
 if (-not (Test-Path $ConfigDir)) {
     New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
     # Restrict directory permissions to current user only
     icacls $ConfigDir /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" | Out-Null
+}
+if (-not (Test-Path $VpnDiagnosticLogDir)) {
+    New-Item -ItemType Directory -Path $VpnDiagnosticLogDir -Force | Out-Null
 }
 
 # ============================================================
@@ -1037,6 +1042,66 @@ function Write-DuoPushOptions {
     }
 }
 
+function Test-VpnDiagnosticVerboseConsole {
+    return ($env:VPN_DEBUG -eq '1') -or ($VerbosePreference -eq 'Continue')
+}
+
+function Get-VpnDiagnosticLogDisplayPath {
+    param([string]$LogPath)
+    if (-not $LogPath) { return "" }
+    if ($LogPath.StartsWith($ConfigDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $LogPath.Replace($ConfigDir, '~/.vpn-auto-connect')
+    }
+    return $LogPath
+}
+
+function Initialize-VpnConnectDiagnosticLog {
+    if (-not (Test-Path $VpnDiagnosticLogDir)) {
+        New-Item -ItemType Directory -Path $VpnDiagnosticLogDir -Force | Out-Null
+    }
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $script:VpnDiagnosticLogPath = Join-Path $VpnDiagnosticLogDir "connect-$stamp.log"
+    $header = @(
+        "=== VPN connect diagnostic log ===",
+        "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+        ""
+    ) -join "`n"
+    Set-Content -Path $script:VpnDiagnosticLogPath -Value $header -Encoding UTF8
+}
+
+function Write-VpnDiagnosticLogSection {
+    param(
+        [string]$Title,
+        [string]$Body
+    )
+    if (-not $Body) { return }
+
+    if (Test-VpnDiagnosticVerboseConsole) {
+        Write-Host "--- $Title ---" -ForegroundColor DarkGray
+        Write-Host $Body -ForegroundColor DarkGray
+        return
+    }
+
+    if (-not $script:VpnDiagnosticLogPath) {
+        Initialize-VpnConnectDiagnosticLog
+    }
+    Add-Content -Path $script:VpnDiagnosticLogPath -Value @("", "--- $Title ---", $Body, "") -Encoding UTF8
+}
+
+function Write-VpnDiagnosticLogHint {
+    if (Test-VpnDiagnosticVerboseConsole) { return }
+    if (-not $script:VpnDiagnosticLogPath) { return }
+    $displayPath = Get-VpnDiagnosticLogDisplayPath -LogPath $script:VpnDiagnosticLogPath
+    Write-Host "[..] Full diagnostics saved to: $displayPath" -ForegroundColor DarkGray
+}
+
+function Clear-VpnConnectDiagnosticLog {
+    if ($script:VpnDiagnosticLogPath -and (Test-Path -LiteralPath $script:VpnDiagnosticLogPath)) {
+        Remove-Item -LiteralPath $script:VpnDiagnosticLogPath -Force -ErrorAction SilentlyContinue
+    }
+    $script:VpnDiagnosticLogPath = $null
+}
+
 function Get-DuoPromptDiagnostics {
     param(
         [string]$Text,
@@ -1071,8 +1136,7 @@ function Write-DuoPromptDiagnostics {
     )
     $diag = Get-DuoPromptDiagnostics -Text $Text -MaskValues $MaskValues
     if (-not $diag) { return }
-    Write-Host "--- DUO prompt diagnostics ---" -ForegroundColor DarkGray
-    Write-Host $diag -ForegroundColor DarkGray
+    Write-VpnDiagnosticLogSection -Title 'DUO prompt diagnostics' -Body $diag
 }
 
 function Get-VpnDiagnosticMaskValues {
@@ -1150,8 +1214,7 @@ function Write-RecentVpnMfaBuffer {
     )
     $recent = Get-RecentVpnMfaBuffer -Text $Text -MaxLines $MaxLines -MaskValues $MaskValues
     if (-not $recent) { return }
-    Write-Host "--- recent vpncli MFA buffer ---" -ForegroundColor DarkGray
-    Write-Host $recent -ForegroundColor DarkGray
+    Write-VpnDiagnosticLogSection -Title 'recent vpncli MFA buffer' -Body $recent
 }
 
 function Get-CiscoLogDiagnostics {
@@ -1240,24 +1303,20 @@ function Write-CiscoLogDiagnostics {
     $diag = Get-CiscoLogDiagnostics -SearchPaths $SearchPaths -MaskValues $MaskValues -MaxFiles $MaxFiles -TailLines $TailLines
     if (-not $diag) { return }
 
-    Write-Host "--- Cisco log diagnostics ---" -ForegroundColor DarkGray
-    if ($env:VPN_DEBUG -eq '1') {
-        foreach ($path in @($diag.SearchPaths)) {
-            if ($path) {
-                Write-Host ("scan path: {0}" -f $path) -ForegroundColor DarkGray
-            }
-        }
-        foreach ($file in @($diag.Files)) {
-            if ($file.FullName) {
-                Write-Host ("recent file: {0} ({1:yyyy-MM-dd HH:mm:ss})" -f $file.FullName, $file.LastWriteTime) -ForegroundColor DarkGray
-            }
+    $bodyLines = @()
+    foreach ($path in @($diag.SearchPaths)) {
+        if ($path) { $bodyLines += ("scan path: {0}" -f $path) }
+    }
+    foreach ($file in @($diag.Files)) {
+        if ($file.FullName) {
+            $bodyLines += ("recent file: {0} ({1:yyyy-MM-dd HH:mm:ss})" -f $file.FullName, $file.LastWriteTime)
         }
     }
     foreach ($line in @($diag.Lines)) {
-        if ($line -and $line.Trim()) {
-            Write-Host $line -ForegroundColor DarkGray
-        }
+        if ($line -and $line.Trim()) { $bodyLines += $line }
     }
+    if ($bodyLines.Count -eq 0) { return }
+    Write-VpnDiagnosticLogSection -Title 'Cisco log diagnostics' -Body ($bodyLines -join "`n")
 }
 
 function Select-DuoPushOption {
@@ -1520,7 +1579,7 @@ function Test-VpnConnectedByIp {
     return (Test-VpnSessionConnected)
 }
 
-function Write-VpnTunnelDiagnostics {
+function Get-VpnTunnelDiagnosticsText {
     param(
         $Session = $null,
         $CiscoAdapters = $null,
@@ -1528,18 +1587,17 @@ function Write-VpnTunnelDiagnostics {
         $TenAddresses = $null
     )
 
-    Write-Host "--- VPN tunnel diagnostics ---" -ForegroundColor DarkGray
-
+    $lines = @()
     $proc = $null
     if ($Session -and $Session.Process) { $proc = $Session.Process }
     if ($proc) {
         if ($proc.HasExited) {
-            Write-Host "vpncli: exited (PID $($proc.Id), exit $($proc.ExitCode))" -ForegroundColor DarkGray
+            $lines += "vpncli: exited (PID $($proc.Id), exit $($proc.ExitCode))"
         } else {
-            Write-Host "vpncli: running (PID $($proc.Id))" -ForegroundColor DarkGray
+            $lines += "vpncli: running (PID $($proc.Id))"
         }
     } else {
-        Write-Host "vpncli: unavailable" -ForegroundColor DarkGray
+        $lines += 'vpncli: unavailable'
     }
 
     if ($null -eq $CiscoAdapters) {
@@ -1570,27 +1628,40 @@ function Write-VpnTunnelDiagnostics {
 
     if ($CiscoAdapters) {
         foreach ($adapter in @($CiscoAdapters)) {
-            Write-Host "Cisco adapter: $($adapter.Name) | $($adapter.Status) | $($adapter.InterfaceDescription)" -ForegroundColor DarkGray
+            $lines += "Cisco adapter: $($adapter.Name) | $($adapter.Status) | $($adapter.InterfaceDescription)"
         }
     } else {
-        Write-Host "Cisco adapter: not found" -ForegroundColor DarkGray
+        $lines += 'Cisco adapter: not found'
     }
 
     if ($CiscoAddresses) {
         foreach ($addr in @($CiscoAddresses)) {
-            Write-Host "Cisco IPv4: $($addr.IPAddress)" -ForegroundColor DarkGray
+            $lines += "Cisco IPv4: $($addr.IPAddress)"
         }
     } else {
-        Write-Host "Cisco IPv4: none" -ForegroundColor DarkGray
+        $lines += 'Cisco IPv4: none'
     }
 
     if ($TenAddresses) {
         foreach ($addr in @($TenAddresses)) {
-            Write-Host "10.x IPv4: $($addr.IPAddress)" -ForegroundColor DarkGray
+            $lines += "10.x IPv4: $($addr.IPAddress)"
         }
     } else {
-        Write-Host "10.x IPv4: none" -ForegroundColor DarkGray
+        $lines += '10.x IPv4: none'
     }
+
+    return ($lines -join "`n")
+}
+
+function Write-VpnTunnelDiagnostics {
+    param(
+        $Session = $null,
+        $CiscoAdapters = $null,
+        $CiscoAddresses = $null,
+        $TenAddresses = $null
+    )
+    $body = Get-VpnTunnelDiagnosticsText -Session $Session -CiscoAdapters $CiscoAdapters -CiscoAddresses $CiscoAddresses -TenAddresses $TenAddresses
+    Write-VpnDiagnosticLogSection -Title 'VPN tunnel diagnostics' -Body $body
 }
 
 function Get-VpnCliBufferText {
@@ -1602,9 +1673,8 @@ function Get-VpnCliBufferText {
 function Write-VpnCliTail {
     param([string]$Output, [switch]$Force)
     if (-not $Output) { return }
-    if (-not $Force -and ($VerbosePreference -eq 'Continue' -or $env:VPN_DEBUG -eq '1')) { return }
-    Write-Host "--- vpncli output ---" -ForegroundColor DarkGray
-    Write-Host $Output -ForegroundColor DarkGray
+    if (-not $Force -and (Test-VpnDiagnosticVerboseConsole)) { return }
+    Write-VpnDiagnosticLogSection -Title 'vpncli output' -Body $Output
 }
 
 function Test-VpnCliAuthFailed {
@@ -1767,7 +1837,7 @@ function Write-VpnConnectResult {
         [bool]$ShowCliOutput
     )
     if (-not $ShowCliOutput -and $Output) {
-        Write-Host $Output -ForegroundColor DarkGray
+        Write-VpnDiagnosticLogSection -Title 'vpncli output (connect result)' -Body $Output
     }
     $vpnAdapter = Get-VpnTunnelAddress
 
@@ -1916,6 +1986,7 @@ function Complete-VpnConnectTimed {
         }
         Write-CiscoLogDiagnostics -MaskValues $DiagnosticMaskValues
         Write-VpnCliTail -Output $output -Force
+        Write-VpnDiagnosticLogHint
         return @{ Connected = $false; CertAccepted = $false; AuthFailed = $true }
     }
     if (Test-VpnConnectedByIp) { $Connected = $true }
@@ -1930,6 +2001,9 @@ function Complete-VpnConnectTimed {
         Write-VpnTunnelDiagnostics -Session $Session
         Write-CiscoLogDiagnostics -MaskValues $DiagnosticMaskValues
         Write-VpnCliTail -Output $output -Force
+        Write-VpnDiagnosticLogHint
+    } else {
+        Clear-VpnConnectDiagnosticLog
     }
     return @{ Connected = $Connected; CertAccepted = $true; AuthFailed = $false }
 }
@@ -1980,6 +2054,7 @@ function Invoke-VpnConnectTimed {
         Write-RecentVpnMfaBuffer -Text $outputAfterPwd -MaskValues $diagnosticMaskValues
         Write-CiscoLogDiagnostics -MaskValues $diagnosticMaskValues
         Write-VpnCliTail -Output $outputAfterPwd -Force
+        Write-VpnDiagnosticLogHint
         return @{ Connected = $false; CertAccepted = $false; AuthFailed = $true }
     }
 
@@ -2123,6 +2198,7 @@ function Connect-Vpn {
     $session = $null
     $connected = $false
     $resultMarkerWritten = $false
+    Clear-VpnConnectDiagnosticLog
 
     try {
         $session = New-VpnCliSession -CliPath $VpnCliPath -ShowOutput $showCliOutput
@@ -2150,6 +2226,7 @@ function Connect-Vpn {
             Write-RecentVpnMfaBuffer -Text $earlyOutput -MaskValues $diagnosticMaskValues
             Write-CiscoLogDiagnostics -MaskValues $diagnosticMaskValues
             Write-VpnCliTail -Output $earlyOutput -Force
+            Write-VpnDiagnosticLogHint
             Write-Host "[!!] vpncli could not reach the server. Check: network, DNS, vpnagent service." -ForegroundColor Red
         }
         Write-Host "[!!] Error: $errorText" -ForegroundColor Red
