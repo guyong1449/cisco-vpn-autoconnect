@@ -3,7 +3,7 @@
 # ============================================================
 # Usage:
 #   .\vpn-auto-connect.ps1                          # First run: setup credentials
-#   .\vpn-auto-connect.ps1 -Connect                 # Auto-connect (DUO push to phone)
+#   .\vpn-auto-connect.ps1 -Connect                 # Auto-connect (DUO push)
 #   .\vpn-auto-connect.ps1 -Connect -DuoMethod passcode  # Full auto (TOTP code)
 #   .\vpn-auto-connect.ps1 -Disconnect              # Disconnect VPN
 #   .\vpn-auto-connect.ps1 -SaveCredentials         # Re-save credentials
@@ -15,8 +15,9 @@
 # 参数说明 / Parameters
 # ============================================================
 # -Connect                连接 VPN / Connect to VPN
+# -Preset <name>          连接指定预设 / Connect using preset profile: dku, duke
 # -Disconnect             断开 VPN / Disconnect VPN
-# -DuoMethod <method>     DUO 验证方式 / DUO method: push(推送), phone(电话), passcode(TOTP)
+# -DuoMethod <method>     DUO 验证方式 / DUO method: push(推送), passcode(TOTP)
 # -Status                 显示连接状态 / Show connection status
 # -SaveCredentials        保存凭据 / Save credentials (legacy single-config)
 # -SaveTOTP               保存 TOTP 密钥 / Save TOTP secret for auto passcode
@@ -35,8 +36,18 @@
 param(
     [string]$VpnServer,
     [string]$VpnGroup,
-    [ValidateSet("push", "phone", "passcode")]
+    [ValidateSet("push", "passcode")]
     [string]$DuoMethod = "push",
+    [ValidateSet("dku", "duke")]
+    [string]$Preset,
+    [string]$ProfileName,
+    [string]$Username,
+    [string]$Password,
+    [string]$Server,
+    [string]$Group,
+    [string]$Port,
+    [string]$Protocol,
+    [string]$PushTo,
     [switch]$Connect,
     [switch]$Disconnect,
     [switch]$SaveCredentials,
@@ -55,9 +66,14 @@ param(
     [string]$Set,
     [string]$SetValue,
     [switch]$Config,
+    [switch]$ConfigJson,
     [switch]$Brief,
     [switch]$Reset,
-    [switch]$NonInteractiveMfa,
+    [switch]$MigrateOnly,
+    [switch]$ProfileUpsert,
+    [switch]$PreservePassword,
+    [switch]$SetActive,
+    [switch]$Force,
     [switch]$LoadFunctionsOnly
 )
 
@@ -184,6 +200,211 @@ function Migrate-LegacyConfigIfNeeded {
     Write-Host "[OK] Migrated to profile 'default'" -ForegroundColor Green
 }
 
+function Normalize-ProfileName {
+    param([string]$Name)
+    if (-not $Name) { return "" }
+    return ($Name -replace '[^a-zA-Z0-9_-]', '')
+}
+
+function Get-ProfileDisplayName {
+    param([string]$Name)
+    if ($Name -eq "dku") { return "DKU VPN" }
+    if ($Name -eq "duke") { return "Duke VPN" }
+    return $Name
+}
+
+function Test-PresetProfileName {
+    param([string]$Name)
+    return $Name -in @("dku", "duke")
+}
+
+function Get-PresetProfileServer {
+    param([string]$Name)
+    switch ($Name) {
+        "dku" { return "portal.dukekunshan.edu.cn" }
+        "duke" { return "vpn.duke.edu" }
+        default { return "" }
+    }
+}
+
+function Get-ProfileConfigPath {
+    param([string]$Name)
+    return "$(Get-ProfileDir $Name)\config.json"
+}
+
+function Get-ProfileCredPath {
+    param([string]$Name)
+    return "$(Get-ProfileDir $Name)\credentials.xml"
+}
+
+function Get-ProfileTotpPath {
+    param([string]$Name)
+    return "$(Get-ProfileDir $Name)\totp.xml"
+}
+
+function Get-ProfileConfigObject {
+    param([string]$Name)
+    $configPath = Get-ProfileConfigPath $Name
+    if (-not (Test-Path $configPath)) { return $null }
+    return Get-Content $configPath -Raw | ConvertFrom-Json
+}
+
+function Get-ProfileCredObject {
+    param([string]$Name)
+    $credPath = Get-ProfileCredPath $Name
+    if (-not (Test-Path $credPath)) { return $null }
+    try {
+        return Get-Content $credPath -Raw | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Get-ProfileSnapshot {
+    param(
+        [string]$Name,
+        [string]$ActiveProfile
+    )
+
+    $cfg = Get-ProfileConfigObject $Name
+    $cred = Get-ProfileCredObject $Name
+    $pushTo = ""
+    $duoMethod = "push"
+    if ($cfg) {
+        if ($cfg.PSObject.Properties.Name -contains 'DuoPushTarget' -and $cfg.DuoPushTarget) {
+            $pushTo = $cfg.DuoPushTarget
+        }
+        if ($cfg.PSObject.Properties.Name -contains 'DuoMethod' -and $cfg.DuoMethod) {
+            $duoMethod = $cfg.DuoMethod
+        }
+    }
+
+    return [PSCustomObject]@{
+        name        = $Name
+        displayName = (Get-ProfileDisplayName $Name)
+        isActive    = ($Name -eq $ActiveProfile)
+        username    = if ($cred) { $cred.Username } else { "" }
+        hasPassword = [bool]($cred -and $cred.Password)
+        server      = if ($cfg) { $cfg.Server } else { "" }
+        port        = if ($cfg) { $cfg.Port } else { "" }
+        protocol    = if ($cfg) { $cfg.Protocol } else { "" }
+        group       = if ($cfg) { $cfg.Group } else { "" }
+        duoMethod   = $duoMethod
+        pushTo      = $pushTo
+        hasTotp     = (Test-Path (Get-ProfileTotpPath $Name))
+    }
+}
+
+function Get-ProfileSnapshots {
+    $index = Get-ProfilesIndex
+    $active = Get-ActiveProfile
+    $profiles = @()
+    foreach ($name in $index) {
+        $profiles += Get-ProfileSnapshot -Name $name -ActiveProfile $active
+    }
+    return [PSCustomObject]@{
+        activeProfile = $active
+        profiles      = $profiles
+    }
+}
+
+function Save-VpnProfileCore {
+    param(
+        [string]$Name,
+        [string]$Server,
+        [string]$Group,
+        [string]$Port,
+        [string]$Protocol,
+        [string]$Username,
+        [string]$Password,
+        [string]$DuoMethod,
+        [string]$PushTo,
+        [switch]$PreservePassword,
+        [switch]$SetActive
+    )
+
+    $normalizedName = Normalize-ProfileName -Name $Name
+    if (-not $normalizedName) { throw "Profile name cannot be empty." }
+    if (-not $Server) { throw "Server is required." }
+    if (-not $Port) { $Port = "443" }
+    if (-not $Protocol) { $Protocol = "ssl" }
+    if ($Protocol -notin @("ssl", "ipsec", "any")) { throw "Protocol must be: ssl, ipsec, or any." }
+    if (-not $Username) { throw "Username is required." }
+
+    $resolvedDuo = if ($DuoMethod) { $DuoMethod.ToLowerInvariant() } else { "push" }
+    if (-not (Test-SupportedDuoMethod -Method $resolvedDuo)) {
+        throw "DUO method must be: push or passcode."
+    }
+
+    $normalizedPushTo = $null
+    if ($PSBoundParameters.ContainsKey('PushTo')) {
+        if (-not $PushTo -or $PushTo -in @("-", "clear", "none")) {
+            $normalizedPushTo = ""
+        } else {
+            $normalizedPushTo = Normalize-DuoPushTarget -Value $PushTo
+            if (-not $normalizedPushTo) {
+                throw "PushTo must be a Cisco DUO menu number such as 1 or 2."
+            }
+        }
+    }
+
+    $profileDir = Get-ProfileDir $normalizedName
+    $configPath = Get-ProfileConfigPath $normalizedName
+    $credPath = Get-ProfileCredPath $normalizedName
+    $existingCred = Get-ProfileCredObject $normalizedName
+
+    if ($PreservePassword -and -not $existingCred) {
+        throw "Cannot preserve password because no saved credentials exist for profile '$normalizedName'."
+    }
+    if (-not $PreservePassword -and -not $PSBoundParameters.ContainsKey('Password')) {
+        throw "Password is required unless -PreservePassword is used."
+    }
+
+    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+
+    $config = [ordered]@{
+        Server    = $Server
+        Group     = $Group
+        Port      = $Port
+        Protocol  = $Protocol
+        DuoMethod = $resolvedDuo
+    }
+    if ($PSBoundParameters.ContainsKey('PushTo') -and $normalizedPushTo) {
+        $config.DuoPushTarget = $normalizedPushTo
+    }
+    $config | ConvertTo-Json | Set-Content $configPath -Encoding UTF8
+
+    if ($PreservePassword) {
+        $credObject = [PSCustomObject]@{
+            Server   = $Server
+            Username = $Username
+            Password = $existingCred.Password
+        }
+    } else {
+        $credObject = [PSCustomObject]@{
+            Server   = $Server
+            Username = $Username
+            Password = (Encrypt-String $Password)
+        }
+    }
+    $credObject | ConvertTo-Json | Set-Content $credPath -Encoding UTF8
+
+    $index = @()
+    $existingIndex = Get-ProfilesIndex
+    if ($existingIndex) { $index = @($existingIndex) }
+    if ($index -notcontains $normalizedName) {
+        $index += $normalizedName
+        Save-ProfilesIndex $index
+    }
+
+    $active = Get-ActiveProfile
+    if ($SetActive -or -not $active) {
+        Set-ActiveProfile $normalizedName
+    }
+
+    return Get-ProfileSnapshot -Name $normalizedName -ActiveProfile (Get-ActiveProfile)
+}
+
 function Add-VpnProfile {
     Write-Host ""
     Write-Host "=== Add New VPN Profile ===" -ForegroundColor Yellow
@@ -191,7 +412,7 @@ function Add-VpnProfile {
 
     $name = Read-Host "Profile name (e.g. dku, company, home-lab)"
     if (-not $name) { Write-Host "[!!] Name cannot be empty" -ForegroundColor Red; return }
-    $name = $name -replace '[^a-zA-Z0-9_-]', ''
+    $name = Normalize-ProfileName -Name $name
 
     # Check if profile already exists
     $existing = Get-ProfilesIndex
@@ -228,54 +449,27 @@ function Add-VpnProfile {
     if ($duoPushTarget) { $duoPushTarget = Normalize-DuoPushTarget -Value $duoPushTarget.Trim() }
 
     Write-Host ""
+    Write-Host "[*] Optional: default DUO method" -ForegroundColor Gray
+    $duoMethod = Read-Host "  DUO method (push/passcode, Enter for push)"
+    if (-not $duoMethod) { $duoMethod = "push" }
+
+    Write-Host ""
     $username = Read-Host "Username"
     $securePassword = Read-Host "Password" -AsSecureString
     $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
     $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
     [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
-    # Create profile directory
-    $profileDir = Get-ProfileDir $name
-    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+    $snapshot = Save-VpnProfileCore -Name $name -Server $server -Group $group -Port $port -Protocol $protocol `
+        -Username $username -Password $plainPassword -DuoMethod $duoMethod -PushTo $duoPushTarget -SetActive
 
-    # Save profile config
-    $config = @{
-        Server   = $server
-        Group    = $group
-        Port     = $port
-        Protocol = $protocol
-    }
-    if ($duoPushTarget) {
-        $config.DuoPushTarget = $duoPushTarget
-    }
-    $config | ConvertTo-Json | Set-Content "$profileDir\config.json" -Encoding UTF8
-
-    # Save profile credentials
-    $credObject = [PSCustomObject]@{
-        Server   = $server
-        Username = $username
-        Password = (Encrypt-String $plainPassword)
-    }
-    $credObject | ConvertTo-Json | Set-Content "$profileDir\credentials.xml" -Encoding UTF8
-
-    # Copy TOTP if exists in main config
     if (Test-Path $TotpFile) {
-        Copy-Item $TotpFile "$profileDir\totp.xml" -Force
+        Copy-Item $TotpFile (Get-ProfileTotpPath $snapshot.name) -Force
     }
 
-    # Update index
-    $index = Get-ProfilesIndex
-    $index += $name
-    Save-ProfilesIndex $index
-
-    # Set as active if it's the first profile
-    if ($index.Count -eq 1) {
-        Set-ActiveProfile $name
-    }
-
-    Write-Host "[OK] Profile '$name' created" -ForegroundColor Green
+    Write-Host "[OK] Profile '$($snapshot.name)' created" -ForegroundColor Green
     Write-Host "     Server: $server" -ForegroundColor Gray
-    Write-Host "     Use: vpn-config use $name" -ForegroundColor Gray
+    Write-Host "     Use: vpn-config use $($snapshot.name)" -ForegroundColor Gray
 }
 
 function Use-VpnProfile {
@@ -296,8 +490,9 @@ function Use-VpnProfile {
 function Show-Config {
     param([switch]$Brief)
 
-    $index = Get-ProfilesIndex
-    $active = Get-ActiveProfile
+    $snapshot = Get-ProfileSnapshots
+    $index = @($snapshot.profiles)
+    $active = $snapshot.activeProfile
 
     if ($Brief) {
         # Compact profile list (replaces vpn-ls)
@@ -308,16 +503,11 @@ function Show-Config {
         Write-Host ""
         Write-Host "VPN Profiles:" -ForegroundColor Cyan
         Write-Host "-------------------------------------------" -ForegroundColor DarkGray
-        foreach ($name in $index) {
-            $marker = if ($name -eq $active) { " *" } else { "  " }
-            $profileDir = Get-ProfileDir $name
-            $config = $null
-            if (Test-Path "$profileDir\config.json") {
-                $config = Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
-            }
-            $serverInfo = if ($config) { "$($config.Server):$($config.Port)" } else { "(incomplete)" }
-            $color = if ($name -eq $active) { "Green" } else { "Gray" }
-            Write-Host "$marker$name" -NoNewline -ForegroundColor $color
+        foreach ($profile in $index) {
+            $marker = if ($profile.isActive) { " *" } else { "  " }
+            $serverInfo = if ($profile.server) { "$($profile.server):$($profile.port)" } else { "(incomplete)" }
+            $color = if ($profile.isActive) { "Green" } else { "Gray" }
+            Write-Host "$marker$($profile.name)" -NoNewline -ForegroundColor $color
             Write-Host "  $serverInfo" -ForegroundColor DarkGray
         }
         Write-Host "-------------------------------------------" -ForegroundColor DarkGray
@@ -339,7 +529,7 @@ function Show-Config {
 
     # TOTP status (check profile first, then global)
     $hasTotp = $false
-    if ($active) { $hasTotp = Test-Path "$(Get-ProfileDir $active)\totp.xml" }
+    if ($active) { $hasTotp = Test-Path (Get-ProfileTotpPath $active) }
     if (-not $hasTotp) { $hasTotp = Test-Path $TotpFile }
     $totpStatus = if ($hasTotp) { "saved" } else { "not set" }
     Write-Host "TOTP Secret:    $totpStatus" -ForegroundColor $(if ($hasTotp) { "Green" } else { "Yellow" })
@@ -357,44 +547,21 @@ function Show-Config {
     Write-Host "Profiles ($($index.Count)):" -ForegroundColor Cyan
     Write-Host "-------------------------------------------" -ForegroundColor DarkGray
 
-    foreach ($name in $index) {
-        $marker = if ($name -eq $active) { " *" } else { "  " }
-        $color = if ($name -eq $active) { "Green" } else { "White" }
-        Write-Host "$marker$name" -ForegroundColor $color
+    foreach ($profile in $index) {
+        $marker = if ($profile.isActive) { " *" } else { "  " }
+        $color = if ($profile.isActive) { "Green" } else { "White" }
+        Write-Host "$marker$($profile.name)" -ForegroundColor $color
 
-        $profileDir = Get-ProfileDir $name
-
-        # Config
-        if (Test-Path "$profileDir\config.json") {
-            $cfg = Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
-            Write-Host "    Server:   $($cfg.Server)" -ForegroundColor Gray
-            Write-Host "    Port:     $($cfg.Port)" -ForegroundColor Gray
-            Write-Host "    Protocol: $($cfg.Protocol)" -ForegroundColor Gray
-            Write-Host "    Group:    $($cfg.Group)" -ForegroundColor Gray
-            $pushTarget = if ($cfg.PSObject.Properties.Name -contains 'DuoPushTarget' -and $cfg.DuoPushTarget) { $cfg.DuoPushTarget } else { "(blank, auto)" }
-            Write-Host "    PushTo:   $pushTarget" -ForegroundColor Gray
-            Write-Host "              optional menu number; leave blank if only one DUO phone is enrolled" -ForegroundColor DarkGray
-        } else {
-            Write-Host "    (no config)" -ForegroundColor DarkGray
-        }
-
-        # Credentials
-        if (Test-Path "$profileDir\credentials.xml") {
-            try {
-                $credData = Get-Content "$profileDir\credentials.xml" -Raw | ConvertFrom-Json
-                Write-Host "    NetID:    $($credData.Username)" -ForegroundColor Gray
-                Write-Host "    Password: (saved)" -ForegroundColor Gray
-            } catch {
-                Write-Host "    Credentials: (read error)" -ForegroundColor Red
-            }
-        } else {
-            Write-Host "    Credentials: (none)" -ForegroundColor DarkGray
-        }
-
-        # Per-profile TOTP
-        if (Test-Path "$profileDir\totp.xml") {
-            Write-Host "    TOTP:     (saved)" -ForegroundColor Gray
-        }
+        Write-Host "    NetID:      $(if ($profile.username) { $profile.username } else { '-' })" -ForegroundColor Gray
+        Write-Host "    Password:   $(if ($profile.hasPassword) { '(saved)' } else { '(none)' })" -ForegroundColor Gray
+        Write-Host "    Server:     $(if ($profile.server) { $profile.server } else { '-' })" -ForegroundColor Gray
+        Write-Host "    Port:       $(if ($profile.port) { $profile.port } else { '-' })" -ForegroundColor Gray
+        Write-Host "    Protocol:   $(if ($profile.protocol) { $profile.protocol } else { '-' })" -ForegroundColor Gray
+        Write-Host "    Group:      $(if ($profile.group -ne $null -and $profile.group -ne '') { $profile.group } else { '-' })" -ForegroundColor Gray
+        Write-Host "    DUO Method: $(if ($profile.duoMethod) { $profile.duoMethod } else { 'push' })" -ForegroundColor Gray
+        Write-Host "    PushTo:     $(if ($profile.pushTo) { $profile.pushTo } else { '(blank, auto)' })" -ForegroundColor Gray
+        Write-Host "    TOTP:       $(if ($profile.hasTotp) { '(saved)' } else { '(not set)' })" -ForegroundColor Gray
+        Write-Host "                optional menu number; leave blank if only one DUO phone is enrolled" -ForegroundColor DarkGray
 
         Write-Host ""
     }
@@ -406,7 +573,7 @@ function Show-Config {
 }
 
 function Remove-VpnProfile {
-    param([string]$Name)
+    param([string]$Name, [switch]$Force)
     if (-not $Name) {
         Write-Host "[!!] Usage: vpn-rm <profile-name>" -ForegroundColor Red
         return
@@ -417,8 +584,10 @@ function Remove-VpnProfile {
         return
     }
 
-    $confirm = Read-Host "Delete profile '$Name'? (y/N)"
-    if ($confirm -ne "y") { return }
+    if (-not $Force) {
+        $confirm = Read-Host "Delete profile '$Name'? (y/N)"
+        if ($confirm -ne "y") { return }
+    }
 
     # Remove profile directory
     $profileDir = Get-ProfileDir $Name
@@ -454,8 +623,8 @@ function Edit-VpnProfile {
         return
     }
 
-    $profileDir = Get-ProfileDir $Name
-    $config = Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
+    $config = Get-ProfileConfigObject $Name
+    $cred = Get-ProfileCredObject $Name
 
     Write-Host ""
     Write-Host "=== Edit Profile: $Name ===" -ForegroundColor Yellow
@@ -463,55 +632,56 @@ function Edit-VpnProfile {
     Write-Host "  Current group:    $($config.Group)" -ForegroundColor Gray
     Write-Host "  Current port:     $($config.Port)" -ForegroundColor Gray
     Write-Host "  Current protocol: $($config.Protocol)" -ForegroundColor Gray
+    Write-Host "  Current DUO:      $($config.DuoMethod)" -ForegroundColor Gray
     Write-Host "  Current PushTo:   $($config.DuoPushTarget)" -ForegroundColor Gray
     Write-Host ""
 
     $server = Read-Host "New server (Enter to keep)"
-    if ($server) { $config.Server = $server }
+    if (-not $server) { $server = $config.Server }
 
     $group = Read-Host "New group (Enter to keep, '-' to clear)"
-    if ($group -eq "-") { $config.Group = "" }
-    elseif ($group) { $config.Group = $group }
+    if ($group -eq "-") { $group = "" }
+    elseif (-not $group) { $group = $config.Group }
 
     $port = Read-Host "New port (Enter to keep)"
-    if ($port) { $config.Port = $port }
+    if (-not $port) { $port = $config.Port }
 
     $protocol = Read-Host "New protocol (Enter to keep)"
-    if ($protocol) { $config.Protocol = $protocol }
+    if (-not $protocol) { $protocol = $config.Protocol }
+
+    $duoMethod = Read-Host "New DUO method (Enter to keep)"
+    if (-not $duoMethod) { $duoMethod = $config.DuoMethod }
 
     Write-Host "Optional: DUO push target menu number, mainly for multiple-phone accounts." -ForegroundColor DarkGray
     Write-Host "          Default is 1. Enter the Cisco DUO menu number you want, such as 1 or 2." -ForegroundColor DarkGray
+    $existingPushTarget = if ($config.PSObject.Properties.Name -contains 'DuoPushTarget') { $config.DuoPushTarget } else { "" }
     $pushTarget = Read-Host "New push target number (Enter to keep, '-' to clear)"
-    if ($pushTarget -eq "-") {
-        if ($config.PSObject.Properties.Name -contains 'DuoPushTarget') {
-            $config.PSObject.Properties.Remove('DuoPushTarget')
-        }
-    } elseif ($pushTarget) {
-        $normalizedTarget = Normalize-DuoPushTarget -Value $pushTarget.Trim()
-        if (-not $normalizedTarget) {
-            Write-Host "[!!] Push target must be a Cisco DUO menu number such as 1 or 2" -ForegroundColor Red
-            return
-        }
-        $config | Add-Member -NotePropertyName "DuoPushTarget" -NotePropertyValue $normalizedTarget -Force
+    if (-not $pushTarget) {
+        $pushTarget = $existingPushTarget
+    } elseif ($pushTarget -eq "-") {
+        $pushTarget = ""
     }
-
-    $config | ConvertTo-Json | Set-Content "$profileDir\config.json" -Encoding UTF8
 
     # Update credentials if requested
     $changeCred = Read-Host "Update credentials? (y/N)"
+    $username = if ($cred) { $cred.Username } else { "" }
+    $plainPassword = $null
     if ($changeCred -eq "y") {
-        $username = Read-Host "New username"
+        $newUsername = Read-Host "New username"
+        if ($newUsername) { $username = $newUsername }
         $securePassword = Read-Host "New password" -AsSecureString
         $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
         $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+    }
 
-        $credObject = [PSCustomObject]@{
-            Server   = $config.Server
-            Username = $username
-            Password = (Encrypt-String $plainPassword)
-        }
-        $credObject | ConvertTo-Json | Set-Content "$profileDir\credentials.xml" -Encoding UTF8
+    if (-not $username) { $username = Read-Host "Username" }
+    if ($changeCred -eq "y") {
+        Save-VpnProfileCore -Name $Name -Server $server -Group $group -Port $port -Protocol $protocol `
+            -Username $username -Password $plainPassword -DuoMethod $duoMethod -PushTo $pushTarget | Out-Null
+    } else {
+        Save-VpnProfileCore -Name $Name -Server $server -Group $group -Port $port -Protocol $protocol `
+            -Username $username -DuoMethod $duoMethod -PushTo $pushTarget -PreservePassword | Out-Null
     }
 
     Write-Host "[OK] Profile '$Name' updated" -ForegroundColor Green
@@ -538,28 +708,109 @@ function Set-VpnSetting {
         return
     }
 
+    if (-not $active) {
+        $config = Get-Content $configFile -Raw | ConvertFrom-Json
+        switch ($Key) {
+            "server" { $config.Server = $Value; Write-Host "[OK] Server set to: $Value ($scope)" -ForegroundColor Green }
+            "group" { $config.Group = $Value; Write-Host "[OK] Group set to: $Value ($scope)" -ForegroundColor Green }
+            "port" { $config.Port = $Value; Write-Host "[OK] Port set to: $Value ($scope)" -ForegroundColor Green }
+            "protocol" {
+                if ($Value -notin @("ssl", "ipsec", "any")) {
+                    Write-Host "[!!] Protocol must be: ssl, ipsec, or any" -ForegroundColor Red
+                    return
+                }
+                $config.Protocol = $Value
+                Write-Host "[OK] Protocol set to: $Value ($scope)" -ForegroundColor Green
+            }
+            "user" {
+                $username = Read-Host "New username"
+                $securePassword = Read-Host "New password" -AsSecureString
+                $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+                $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+                $credObject = [PSCustomObject]@{
+                    Server   = $config.Server
+                    Username = $username
+                    Password = (Encrypt-String $plainPassword)
+                }
+                $credObject | ConvertTo-Json | Set-Content $credFile -Encoding UTF8
+                Write-Host "[OK] Credentials updated ($scope)" -ForegroundColor Green
+                return
+            }
+            "duo" {
+                if ($Value -notin @("push", "passcode")) {
+                    Write-Host "[!!] DUO method must be: push or passcode" -ForegroundColor Red
+                    return
+                }
+                $config | Add-Member -NotePropertyName "DuoMethod" -NotePropertyValue $Value -Force
+                Write-Host "[OK] Default DUO method set to: $Value ($scope)" -ForegroundColor Green
+            }
+            "push-target" {
+                if (-not $Value -or $Value -in @("-", "clear", "none")) {
+                    if ($config.PSObject.Properties.Name -contains 'DuoPushTarget') {
+                        $config.PSObject.Properties.Remove('DuoPushTarget')
+                    }
+                    Write-Host "[OK] DUO push target cleared ($scope)" -ForegroundColor Green
+                } else {
+                    $targetNumber = Normalize-DuoPushTarget -Value $Value
+                    if (-not $targetNumber) {
+                        Write-Host "[!!] Push target must be a Cisco DUO menu number such as 1 or 2" -ForegroundColor Red
+                        return
+                    }
+                    $config | Add-Member -NotePropertyName "DuoPushTarget" -NotePropertyValue $targetNumber -Force
+                    Write-Host "[OK] DUO push target set to: $targetNumber ($scope)" -ForegroundColor Green
+                }
+            }
+            default {
+                Write-Host "[!!] Unknown setting: $Key" -ForegroundColor Red
+                Write-Host "     Valid keys: server, group, port, protocol, user, duo, push-target" -ForegroundColor Gray
+                return
+            }
+        }
+        $config | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
+        return
+    }
+
     $config = Get-Content $configFile -Raw | ConvertFrom-Json
+    $credData = $null
+    if (Test-Path $credFile) {
+        try {
+            $credData = Get-Content $credFile -Raw | ConvertFrom-Json
+        } catch {
+            $credData = $null
+        }
+    }
+    $currentUsername = if ($credData) { $credData.Username } else { "" }
+    $currentPassword = if ($credData) { $credData.Password } else { "" }
 
     switch ($Key) {
         "server" {
-            $config.Server = $Value
+            Save-VpnProfileCore -Name $active -Server $Value -Group $config.Group -Port $config.Port -Protocol $config.Protocol `
+                -Username $currentUsername -DuoMethod $config.DuoMethod -PushTo $config.DuoPushTarget -PreservePassword | Out-Null
             Write-Host "[OK] Server set to: $Value ($scope)" -ForegroundColor Green
+            return
         }
         "group" {
-            $config.Group = $Value
+            Save-VpnProfileCore -Name $active -Server $config.Server -Group $Value -Port $config.Port -Protocol $config.Protocol `
+                -Username $currentUsername -DuoMethod $config.DuoMethod -PushTo $config.DuoPushTarget -PreservePassword | Out-Null
             Write-Host "[OK] Group set to: $Value ($scope)" -ForegroundColor Green
+            return
         }
         "port" {
-            $config.Port = $Value
+            Save-VpnProfileCore -Name $active -Server $config.Server -Group $config.Group -Port $Value -Protocol $config.Protocol `
+                -Username $currentUsername -DuoMethod $config.DuoMethod -PushTo $config.DuoPushTarget -PreservePassword | Out-Null
             Write-Host "[OK] Port set to: $Value ($scope)" -ForegroundColor Green
+            return
         }
         "protocol" {
             if ($Value -notin @("ssl", "ipsec", "any")) {
                 Write-Host "[!!] Protocol must be: ssl, ipsec, or any" -ForegroundColor Red
                 return
             }
-            $config.Protocol = $Value
+            Save-VpnProfileCore -Name $active -Server $config.Server -Group $config.Group -Port $config.Port -Protocol $Value `
+                -Username $currentUsername -DuoMethod $config.DuoMethod -PushTo $config.DuoPushTarget -PreservePassword | Out-Null
             Write-Host "[OK] Protocol set to: $Value ($scope)" -ForegroundColor Green
+            return
         }
         "user" {
             $username = Read-Host "New username"
@@ -568,29 +819,25 @@ function Set-VpnSetting {
             $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
             [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
-            $credObject = [PSCustomObject]@{
-                Server   = $config.Server
-                Username = $username
-                Password = (Encrypt-String $plainPassword)
-            }
-            $credObject | ConvertTo-Json | Set-Content $credFile -Encoding UTF8
+            Save-VpnProfileCore -Name $active -Server $config.Server -Group $config.Group -Port $config.Port -Protocol $config.Protocol `
+                -Username $username -Password $plainPassword -DuoMethod $config.DuoMethod -PushTo $config.DuoPushTarget | Out-Null
             Write-Host "[OK] Credentials updated ($scope)" -ForegroundColor Green
             return
         }
         "duo" {
-            if ($Value -notin @("push", "phone", "passcode")) {
-                Write-Host "[!!] DUO method must be: push, phone, or passcode" -ForegroundColor Red
+            if ($Value -notin @("push", "passcode")) {
+                Write-Host "[!!] DUO method must be: push or passcode" -ForegroundColor Red
                 return
             }
-            # Store default DUO method in config
-            $config | Add-Member -NotePropertyName "DuoMethod" -NotePropertyValue $Value -Force
+            Save-VpnProfileCore -Name $active -Server $config.Server -Group $config.Group -Port $config.Port -Protocol $config.Protocol `
+                -Username $currentUsername -DuoMethod $Value -PushTo $config.DuoPushTarget -PreservePassword | Out-Null
             Write-Host "[OK] Default DUO method set to: $Value ($scope)" -ForegroundColor Green
+            return
         }
         "push-target" {
             if (-not $Value -or $Value -in @("-", "clear", "none")) {
-                if ($config.PSObject.Properties.Name -contains 'DuoPushTarget') {
-                    $config.PSObject.Properties.Remove('DuoPushTarget')
-                }
+                Save-VpnProfileCore -Name $active -Server $config.Server -Group $config.Group -Port $config.Port -Protocol $config.Protocol `
+                    -Username $currentUsername -DuoMethod $config.DuoMethod -PushTo "" -PreservePassword | Out-Null
                 Write-Host "[OK] DUO push target cleared ($scope)" -ForegroundColor Green
             } else {
                 $targetNumber = Normalize-DuoPushTarget -Value $Value
@@ -598,12 +845,14 @@ function Set-VpnSetting {
                     Write-Host "[!!] Push target must be a Cisco DUO menu number such as 1 or 2" -ForegroundColor Red
                     return
                 }
-                $config | Add-Member -NotePropertyName "DuoPushTarget" -NotePropertyValue $targetNumber -Force
+                Save-VpnProfileCore -Name $active -Server $config.Server -Group $config.Group -Port $config.Port -Protocol $config.Protocol `
+                    -Username $currentUsername -DuoMethod $config.DuoMethod -PushTo $targetNumber -PreservePassword | Out-Null
                 Write-Host "[OK] DUO push target set to: $targetNumber ($scope)" -ForegroundColor Green
                 Write-Host "     Optional; mainly for accounts with multiple DUO phone numbers." -ForegroundColor Gray
                 Write-Host "     This is the Cisco DUO menu number (1/2/3...), not the phone suffix." -ForegroundColor Gray
                 Write-Host "     If only one phone is enrolled, you can leave it blank." -ForegroundColor Gray
             }
+            return
         }
         default {
             Write-Host "[!!] Unknown setting: $Key" -ForegroundColor Red
@@ -611,22 +860,32 @@ function Set-VpnSetting {
             return
         }
     }
-
-    $config | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
 }
 
 function Load-ActiveProfileConfig {
     $active = Get-ActiveProfile
     if (-not $active) { return $null }
-    $profileDir = Get-ProfileDir $active
-    if (-not (Test-Path "$profileDir\config.json")) { return $null }
-    return Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
+    return Load-ProfileConfig -Name $active
 }
 
 function Load-ActiveProfileCredentials {
     $active = Get-ActiveProfile
     if (-not $active) { return $null }
-    $profileDir = Get-ProfileDir $active
+    return Load-ProfileCredentials -Name $active
+}
+
+function Load-ProfileConfig {
+    param([string]$Name)
+    if (-not $Name) { return $null }
+    $profileDir = Get-ProfileDir $Name
+    if (-not (Test-Path "$profileDir\config.json")) { return $null }
+    return Get-Content "$profileDir\config.json" -Raw | ConvertFrom-Json
+}
+
+function Load-ProfileCredentials {
+    param([string]$Name)
+    if (-not $Name) { return $null }
+    $profileDir = Get-ProfileDir $Name
     if (-not (Test-Path "$profileDir\credentials.xml")) { return $null }
     $data = Get-Content "$profileDir\credentials.xml" -Raw | ConvertFrom-Json
     return @{
@@ -953,9 +1212,16 @@ function Test-VpnAgentRunning {
 
 # vpn-status: 优先检查 Cisco 隧道网卡，回退到 10.x.x.x IP / Cisco tunnel adapter first, then 10.x.x.x fallback
 function Get-VpnStatus {
-    if (Get-VpnTunnelAddress) {
-        Write-Host "[OK] VPN connected" -ForegroundColor Green
-        Show-VpnConnectionStatus
+    $vpnAdapter = Get-VpnTunnelAddress
+    if ($vpnAdapter) {
+        $stats = Get-VpnSessionStats
+        $server = Resolve-VpnStatusServer -Stats $stats
+        if ($server) {
+            Write-Host "[OK] VPN connected: $server" -ForegroundColor Green
+        } else {
+            Write-Host "[OK] VPN connected" -ForegroundColor Green
+        }
+        Show-VpnConnectionStatus -Stats $stats -Tunnel $vpnAdapter -Server $server
     } else {
         Write-Host "[!!] VPN not connected" -ForegroundColor Red
     }
@@ -966,12 +1232,106 @@ function Get-VpnStatus {
 
 # vpn-connect helpers: prompt-driven vpncli session (reads stdout, responds to prompts)
 function Get-VpnGroupSelection {
-    param($Config)
-    if ($Config.Group -eq "Library Resources Only") { return "1" }
-    # Timed mode: numbered menu usually expects index; -Default- -> 0
-    if ($Config.Group -eq "-Default-" -or [string]::IsNullOrWhiteSpace($Config.Group)) { return "0" }
-    if ($Config.Group) { return [string]$Config.Group }
-    return "0"
+    param(
+        $Config,
+        $Session = $null,
+        [int]$MenuWaitSeconds = 4
+    )
+
+    $requestedGroup = if ($Config) { [string]$Config.Group } else { "" }
+    if ($requestedGroup -match '^\s*\d+\s*$') {
+        return [string]([int]($requestedGroup.Trim()))
+    }
+
+    $menuOptions = @()
+    if ($Session) {
+        $menuOptions = @(Wait-ForVpnGroupMenuOptions -Session $Session -WaitSeconds $MenuWaitSeconds)
+    }
+
+    if ($menuOptions.Count -gt 0) {
+        if ($requestedGroup -eq "-Default-" -or [string]::IsNullOrWhiteSpace($requestedGroup)) {
+            $defaultOption = $menuOptions | Where-Object {
+                $_.ComparisonKey -eq "default" -or $_.Number -eq "0"
+            } | Select-Object -First 1
+            if ($defaultOption) { return $defaultOption.Number }
+            return "0"
+        }
+
+        $targetKey = Get-VpnGroupComparisonKey -Name $requestedGroup
+        $matchedOption = $menuOptions | Where-Object {
+            $_.ComparisonKey -eq $targetKey
+        } | Select-Object -First 1
+        if ($matchedOption) { return $matchedOption.Number }
+
+        Write-Host "[!!] Configured VPN group '$requestedGroup' was not found in the Cisco group menu." -ForegroundColor Red
+        Write-VpnGroupOptions -Options $menuOptions
+        throw "Configured VPN group '$requestedGroup' was not found in the Cisco group menu."
+    }
+
+    if ($requestedGroup -eq "Library Resources Only") { return "1" }
+    if ($requestedGroup -eq "INTL-DUKE") { return "2" }
+    if ($requestedGroup -eq "-Default-" -or [string]::IsNullOrWhiteSpace($requestedGroup)) { return "0" }
+
+    throw "Could not resolve VPN group '$requestedGroup' to a Cisco menu number because no group menu options were detected."
+}
+
+function Get-VpnGroupComparisonKey {
+    param([string]$Name)
+    if (-not $Name) { return "" }
+    $trimmed = $Name.Trim().ToLowerInvariant()
+    return ($trimmed -replace '[\s_-]+', '')
+}
+
+function Get-VpnGroupMenuOptions {
+    param([string]$Text)
+    $options = @()
+    if (-not $Text) { return $options }
+    $normalized = $Text -replace "`r", ""
+    $seenNumbers = @{}
+    $patterns = @(
+        '(?im)^\s*([0-9]+)\s*[-.):]\s*([^\n]+?)\s*$',
+        '(?im)^\s*([0-9]+)\s+([^\n]+?)\s*$'
+    )
+    foreach ($pattern in $patterns) {
+        foreach ($match in [regex]::Matches($normalized, $pattern)) {
+            $number = $match.Groups[1].Value.Trim()
+            $label = $match.Groups[2].Value.Trim()
+            if (-not $number -or -not $label) { continue }
+            if ($seenNumbers.ContainsKey($number)) { continue }
+            if ($label -match '(?i)push|sms passcode|passcode|password|username|answer|approve|token') { continue }
+            $options += [pscustomobject]@{
+                Number        = $number
+                Label         = $label
+                ComparisonKey = (Get-VpnGroupComparisonKey -Name $label)
+            }
+            $seenNumbers[$number] = $true
+        }
+    }
+    return $options
+}
+
+function Wait-ForVpnGroupMenuOptions {
+    param(
+        $Session,
+        [int]$WaitSeconds = 4
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt $WaitSeconds) {
+        $text = Get-VpnSessionText -Session $Session
+        $options = @(Get-VpnGroupMenuOptions -Text $text)
+        if ($options.Count -gt 0) { return $options }
+        Start-Sleep -Milliseconds 250
+    }
+    return @()
+}
+
+function Write-VpnGroupOptions {
+    param($Options)
+    if (-not $Options) { return }
+    Write-Host "[*] Detected VPN group options:" -ForegroundColor Yellow
+    foreach ($option in $Options) {
+        Write-Host ("     [{0}] {1}" -f $option.Number, $option.Label) -ForegroundColor Gray
+    }
 }
 
 function Get-DuoCliInput {
@@ -980,7 +1340,6 @@ function Get-DuoCliInput {
         [string]$TotpCode
     )
     switch ($EffectiveDuo) {
-        "phone" { return "2" }
         "passcode" { return $TotpCode }
         default { return "1" }
     }
@@ -988,7 +1347,7 @@ function Get-DuoCliInput {
 
 function Test-SupportedDuoMethod {
     param([string]$Method)
-    return $Method -in @("push", "phone", "passcode")
+    return $Method -in @("push", "passcode")
 }
 
 function Normalize-DuoPushTarget {
@@ -999,47 +1358,6 @@ function Normalize-DuoPushTarget {
     $normalized = [int]$digits
     if ($normalized -le 0) { return "" }
     return [string]$normalized
-}
-
-function Get-DuoPushOptions {
-    param([string]$Text)
-    $options = @()
-    if (-not $Text) { return $options }
-    $normalized = $Text -replace "`r", ""
-    $seenNumbers = @{}
-    $patterns = @(
-        '(?im)(?:^|\n)\s*([0-9]+)\s*[-.):]\s*([^\n]*(?:Push|push|Approve|approve|Duo Push|DUO Push)[^\n]*)',
-        '(?im)(?:^|\n)\s*([0-9]+)\s+([^\n]*(?:Push|push|Approve|approve|Duo Push|DUO Push)[^\n]*)'
-    )
-    foreach ($pattern in $patterns) {
-        foreach ($match in [regex]::Matches($normalized, $pattern)) {
-            $number = $match.Groups[1].Value.Trim()
-            $label = $match.Groups[2].Value.Trim()
-            if (-not $number -or -not $label) { continue }
-            if ($seenNumbers.ContainsKey($number)) { continue }
-            $suffix = ""
-            $digitMatches = [regex]::Matches($label, '[0-9]{4}')
-            if ($digitMatches.Count -gt 0) {
-                $suffix = $digitMatches[$digitMatches.Count - 1].Value
-            }
-            $options += [pscustomobject]@{
-                Number = $number
-                Label = $label
-                Suffix = $suffix
-            }
-            $seenNumbers[$number] = $true
-        }
-    }
-    return $options
-}
-
-function Write-DuoPushOptions {
-    param($Options)
-    if (-not $Options) { return }
-    Write-Host "[*] Detected DUO push options:" -ForegroundColor Yellow
-    foreach ($option in $Options) {
-        Write-Host ("     [{0}] {1}" -f $option.Number, $option.Label) -ForegroundColor Gray
-    }
 }
 
 function Test-VpnDiagnosticVerboseConsole {
@@ -1319,52 +1637,6 @@ function Write-CiscoLogDiagnostics {
     Write-VpnDiagnosticLogSection -Title 'Cisco log diagnostics' -Body ($bodyLines -join "`n")
 }
 
-function Select-DuoPushOption {
-    param(
-        $Options,
-        [string]$ConfiguredTarget,
-        [switch]$NonInteractive
-    )
-    if (-not $Options -or $Options.Count -eq 0) {
-        return $null
-    }
-    if ($Options.Count -eq 1) {
-        return $Options[0]
-    }
-
-    $normalizedTarget = Normalize-DuoPushTarget -Value $ConfiguredTarget
-    if ($normalizedTarget) {
-        $matched = @($Options | Where-Object { $_.Number -eq $normalizedTarget })
-        if ($matched.Count -eq 1) {
-            return $matched[0]
-        }
-        Write-Host "[!!] Configured DUO push target number $normalizedTarget did not match the current MFA menu." -ForegroundColor Red
-        Write-DuoPushOptions -Options $Options
-        return $null
-    }
-
-    Write-DuoPushOptions -Options $Options
-    if ($NonInteractive) {
-        Write-Host "[!!] Multiple DUO push targets detected. Set one with: vpn-config set push-target <menu-number>" -ForegroundColor Red
-        return $null
-    }
-
-    Write-Host "[*] Multiple DUO push targets detected." -ForegroundColor Yellow
-    Write-Host "    Optional setting: vpn-config set push-target <menu-number>" -ForegroundColor Gray
-    Write-Host "    Use the Cisco DUO menu number, such as 1 for the first phone or 2 for the second." -ForegroundColor Gray
-    Write-Host "    If you only have one approved phone on your account, you can leave this setting blank." -ForegroundColor Gray
-    while ($true) {
-        $choice = (Read-Host "Choose DUO push option number").Trim()
-        if (-not $choice) { continue }
-        $selected = @($Options | Where-Object { $_.Number -eq $choice })
-        if ($selected.Count -eq 1) {
-            return $selected[0]
-        }
-        $validNumbers = @($Options | ForEach-Object { $_.Number }) -join ", "
-        Write-Host ("[!!] Invalid choice. Please enter one of: {0}" -f $validNumbers) -ForegroundColor Red
-    }
-}
-
 function Get-VpnTunnelAddress {
     $ciscoAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
         $_.Status -eq "Up" -and (
@@ -1513,9 +1785,72 @@ function Get-VpnSessionStats {
     return $timing
 }
 
+function Get-VpnStatusFallbackServer {
+    param(
+        [string]$ProfileName = "",
+        [string]$PresetName = ""
+    )
+
+    if ($PresetName) {
+        $presetServer = Get-PresetProfileServer -Name $PresetName
+        if ($presetServer) { return $presetServer }
+    }
+
+    $targetProfile = $ProfileName
+    if (-not $targetProfile -and (Test-Path $ActiveProfileFile)) {
+        try {
+            $targetProfile = (Get-Content $ActiveProfileFile -Raw).Trim()
+        } catch {
+            $targetProfile = ""
+        }
+    }
+
+    if ($targetProfile) {
+        $profileConfig = Load-ProfileConfig -Name $targetProfile
+        if ($profileConfig -and $profileConfig.Server) {
+            return [string]$profileConfig.Server
+        }
+    }
+
+    $legacyConfig = Load-Config
+    if ($legacyConfig -and $legacyConfig.Server) {
+        return [string]$legacyConfig.Server
+    }
+
+    return ""
+}
+
+function Resolve-VpnStatusServer {
+    param(
+        $Stats = $null,
+        [string]$FallbackServer = "",
+        [string]$ProfileName = "",
+        [string]$PresetName = ""
+    )
+
+    if ($Stats -and $Stats.Server) {
+        $statsServer = [string]$Stats.Server
+        if (-not [string]::IsNullOrWhiteSpace($statsServer) -and $statsServer -notmatch '^\s*不可用\s*$') {
+            return $statsServer.Trim()
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($FallbackServer)) {
+        return $FallbackServer.Trim()
+    }
+
+    return (Get-VpnStatusFallbackServer -ProfileName $ProfileName -PresetName $PresetName)
+}
+
 function Show-VpnConnectionStatus {
-    $vpnAdapter = Get-VpnTunnelAddress
-    $stats = Get-VpnSessionStats
+    param(
+        $Stats = $null,
+        $Tunnel = $null,
+        [string]$Server = ""
+    )
+
+    $vpnAdapter = if ($Tunnel) { $Tunnel } else { Get-VpnTunnelAddress }
+    $stats = if ($Stats) { $Stats } else { Get-VpnSessionStats }
     $displayState = Resolve-VpnDisplayState -Stats $stats -Tunnel $vpnAdapter
 
     if ($vpnAdapter) {
@@ -1526,8 +1861,9 @@ function Show-VpnConnectionStatus {
     } elseif ($stats.ClientIP) {
         Write-Host "     IP: $($stats.ClientIP)" -ForegroundColor Gray
     }
-    if ($stats.Server) {
-        Write-Host "     Server: $($stats.Server)" -ForegroundColor Gray
+    $resolvedServer = Resolve-VpnStatusServer -Stats $stats -FallbackServer $Server
+    if ($resolvedServer) {
+        Write-Host "     Server: $resolvedServer" -ForegroundColor Gray
     }
     if ($stats.Duration) {
         Write-Host "     Duration: $($stats.Duration)" -ForegroundColor Gray
@@ -1834,19 +2170,33 @@ function Write-VpnConnectResult {
     param(
         [bool]$Connected,
         [string]$Output,
-        [bool]$ShowCliOutput
+        [bool]$ShowCliOutput,
+        [string]$ExpectedServer = ""
     )
     if (-not $ShowCliOutput -and $Output) {
         Write-VpnDiagnosticLogSection -Title 'vpncli output (connect result)' -Body $Output
     }
     $vpnAdapter = Get-VpnTunnelAddress
+    $stats = $null
 
     if ($vpnAdapter) {
-        Write-Host "[OK] VPN connected (IP: $($vpnAdapter.IPAddress))" -ForegroundColor Green
+        $stats = Get-VpnSessionStats
+        $server = Resolve-VpnStatusServer -Stats $stats -FallbackServer $ExpectedServer
+        if ($server) {
+            Write-Host "[OK] VPN connected: $server (IP: $($vpnAdapter.IPAddress))" -ForegroundColor Green
+        } else {
+            Write-Host "[OK] VPN connected (IP: $($vpnAdapter.IPAddress))" -ForegroundColor Green
+        }
         return $true
     }
     if ($Connected -or ($Output -match 'Connected')) {
-        Write-Host "[OK] VPN connected" -ForegroundColor Green
+        $stats = Get-VpnSessionStats
+        $server = Resolve-VpnStatusServer -Stats $stats -FallbackServer $ExpectedServer
+        if ($server) {
+            Write-Host "[OK] VPN connected: $server" -ForegroundColor Green
+        } else {
+            Write-Host "[OK] VPN connected" -ForegroundColor Green
+        }
         return $true
     }
     if ($Output -match 'Login denied|Authentication failed|[Aa]ccess denied|登录失败|failed|ʧ') {
@@ -1990,7 +2340,7 @@ function Complete-VpnConnectTimed {
         return @{ Connected = $false; CertAccepted = $false; AuthFailed = $true }
     }
     if (Test-VpnConnectedByIp) { $Connected = $true }
-    $Connected = Write-VpnConnectResult -Connected $Connected -Output $output -ShowCliOutput $ShowCliOutput
+    $Connected = Write-VpnConnectResult -Connected $Connected -Output $output -ShowCliOutput $ShowCliOutput -ExpectedServer $Cred.Server
     if (-not $Connected) {
         Stop-VpnCliForFailureAndDrain -Session $Session
         $output = Get-VpnSessionText -Session $Session
@@ -2018,7 +2368,6 @@ function Invoke-VpnConnectTimed {
         [string]$DuoInputFallback,
         [string]$EffectiveDuo,
         [string]$ConfiguredPushTarget,
-        [switch]$NonInteractiveMfa,
         [bool]$ShowCliOutput
     )
     $proc = $Session.Process
@@ -2033,7 +2382,7 @@ function Invoke-VpnConnectTimed {
     Send-VpnCliLine -Process $proc -Line "connect $ConnectAddr" -Session $Session -StepLabel 'connect'
     Start-Sleep -Seconds 3
 
-    $groupSel = Get-VpnGroupSelection -Config $Config
+    $groupSel = Get-VpnGroupSelection -Config $Config -Session $Session
     Write-Host "[2/6] Selecting group ($groupSel)..." -ForegroundColor Gray
     Send-VpnCliLine -Process $proc -Line $groupSel -Session $Session -StepLabel 'group'
     Start-Sleep -Seconds 1
@@ -2110,17 +2459,36 @@ function Stop-VpnCliSession {
 # vpn-connect: 自动连接 VPN (6 步交互) / Auto-connect VPN (prompt-driven vpncli interaction)
 # 1. 连接服务器  2. 选择分组  3. 发送用户名  4. 发送密码  5. DUO 验证  6. 接受证书
 function Connect-Vpn {
-    # 优先使用活跃 Profile，回退到旧版配置 / Try active profile first, fall back to legacy config
-    $cred = Load-ActiveProfileCredentials
-    if (-not $cred) { $cred = Load-VpnCredentials }
+    $targetProfile = if ($Preset) { $Preset } else { Get-ActiveProfile }
+    $usingPresetProfile = Test-PresetProfileName -Name $targetProfile
+
+    # 优先使用显式/活跃 Profile，回退到旧版配置 / Try explicit/active profile first, fall back to legacy config
+    $cred = $null
+    $config = $null
+    if ($targetProfile) {
+        $cred = Load-ProfileCredentials -Name $targetProfile
+        $config = Load-ProfileConfig -Name $targetProfile
+    }
+    if (-not $Preset -and -not $cred) { $cred = Load-VpnCredentials }
+    if (-not $Preset -and -not $config) { $config = Load-Config }
     if (-not $cred) {
+        if ($Preset) {
+            Write-Host "[!!] Preset profile '$Preset' has no saved credentials yet. Save it first in GUI or with vpn-config." -ForegroundColor Red
+        }
+        Write-VpnResultMarker -State FAILED
+        return
+    }
+    if (-not $config) {
+        if ($Preset) {
+            Write-Host "[!!] Preset profile '$Preset' has no saved config yet. Save it first in GUI or with vpn-config." -ForegroundColor Red
+        }
         Write-VpnResultMarker -State FAILED
         return
     }
 
-    $config = Load-ActiveProfileConfig
-    if (-not $config) { $config = Load-Config }
-    $server = $cred.Server
+    $server = if ($usingPresetProfile) { Get-PresetProfileServer -Name $targetProfile } else { $cred.Server }
+    if (-not $server) { $server = $cred.Server }
+    $cred.Server = $server
 
     $existingTunnel = Get-VpnTunnelAddress
     if ($existingTunnel) {
@@ -2146,7 +2514,7 @@ function Connect-Vpn {
         $effectiveDuo = $config.DuoMethod
     }
     if (-not (Test-SupportedDuoMethod -Method $effectiveDuo)) {
-        Write-Host "[!!] Unsupported DUO method '$effectiveDuo'. Supported methods: push, phone, passcode" -ForegroundColor Red
+        Write-Host "[!!] Unsupported DUO method '$effectiveDuo'. Supported methods: push, passcode" -ForegroundColor Red
         Write-Host "     If this came from saved config, run: vpn-config set duo push" -ForegroundColor Yellow
         Write-VpnResultMarker -State FAILED
         return
@@ -2191,7 +2559,7 @@ function Connect-Vpn {
     }
 
     $connectAddr = $server
-    if ($config.Port -and $config.Port -ne "443") {
+    if ((-not $usingPresetProfile) -and $config.Port -and $config.Port -ne "443") {
         $connectAddr = "${server}:$($config.Port)"
     }
 
@@ -2210,7 +2578,6 @@ function Connect-Vpn {
             DuoInputFallback = $duoInput
             EffectiveDuo  = $effectiveDuo
             ConfiguredPushTarget = $configuredPushTarget
-            NonInteractiveMfa = $NonInteractiveMfa
             ShowCliOutput = $showCliOutput
         }
         $result = Invoke-VpnConnectTimed @connectParams
@@ -2271,6 +2638,10 @@ if ($LoadFunctionsOnly) { return }
 # One-time legacy migration (root files -> profiles/default)
 Migrate-LegacyConfigIfNeeded
 
+if ($MigrateOnly) {
+    exit 0
+}
+
 if ($Reconfigure -or $Reset) {
     # Full reset: clear legacy + all profiles + TOTP
     Remove-Item $ConfigFile -Force -ErrorAction SilentlyContinue
@@ -2302,12 +2673,28 @@ if ($Config) {
     }
     exit 0
 }
+if ($ConfigJson) {
+    (Get-ProfileSnapshots) | ConvertTo-Json -Depth 5
+    exit 0
+}
+if ($ProfileUpsert) {
+    try {
+        $snapshot = Save-VpnProfileCore -Name $ProfileName -Server $Server -Group $Group -Port $Port -Protocol $Protocol `
+            -Username $Username -Password $Password -DuoMethod $DuoMethod -PushTo $PushTo `
+            -PreservePassword:$PreservePassword -SetActive:$SetActive
+        $snapshot | ConvertTo-Json -Depth 4
+        exit 0
+    } catch {
+        Write-Error $_
+        exit 1
+    }
+}
 if ($Use) {
     Use-VpnProfile $Use
     exit 0
 }
 if ($Rm) {
-    Remove-VpnProfile $Rm
+    Remove-VpnProfile -Name $Rm -Force:$Force
     exit 0
 }
 if ($Edit) {
@@ -2328,7 +2715,7 @@ if ($List) {
     }
     Write-Host "-------------------------------------------" -ForegroundColor DarkGray
     Write-Host "  vpn              " -NoNewline; Write-Host "-> Show this list" -ForegroundColor Gray
-    Write-Host "  vpn-connect      " -NoNewline; Write-Host "-> Connect (DUO push)" -ForegroundColor Gray
+    Write-Host "  vpn-connect      " -NoNewline; Write-Host "-> Connect (DUO push, or -Preset dku|duke)" -ForegroundColor Gray
     Write-Host "  vpn-disconnect   " -NoNewline; Write-Host "-> Disconnect" -ForegroundColor Gray
     Write-Host "  vpn-status       " -NoNewline; Write-Host "-> Show status" -ForegroundColor Gray
     Write-Host "  vpn-gui          " -NoNewline; Write-Host "-> Launch GUI manager" -ForegroundColor Gray
@@ -2358,6 +2745,7 @@ if ($Help) {
     Write-Host "CONNECTION:" -ForegroundColor Yellow
     Write-Host "  (no args)                  First-time setup + connect"
     Write-Host "  -Connect                   Connect using saved credentials"
+    Write-Host "  -Connect -Preset <name>    Connect using preset profile (dku or duke)"
     Write-Host "  -Connect -DuoMethod <m>    Connect with specific DUO method"
     Write-Host "  -Disconnect                Disconnect VPN"
     Write-Host "  -Status                    Show connection status"
@@ -2375,17 +2763,17 @@ if ($Help) {
     Write-Host ""
     Write-Host "DUO METHODS:" -ForegroundColor Yellow
     Write-Host "  push       (default) Send push notification to phone"
-    Write-Host "  phone      Call your phone for verification"
     Write-Host "  passcode   Auto-generate TOTP code (fully automatic)"
     Write-Host ""
     Write-Host "EXAMPLES:" -ForegroundColor Yellow
     Write-Host "  .\vpn-auto-connect.ps1                          # First setup"
     Write-Host "  .\vpn-auto-connect.ps1 -Connect                 # Connect (DUO push)"
+    Write-Host "  .\vpn-auto-connect.ps1 -Connect -Preset duke    # Connect Duke preset"
     Write-Host "  .\vpn-auto-connect.ps1 -Connect -DuoMethod passcode  # Full auto"
     Write-Host ""
     Write-Host "GLOBAL COMMANDS:" -ForegroundColor Yellow
     Write-Host "  vpn              List all available commands"
-    Write-Host "  vpn-connect      Connect (DUO push)"
+    Write-Host "  vpn-connect      Connect (DUO push, or -Preset dku|duke)"
     Write-Host "  vpn-disconnect   Disconnect"
     Write-Host "  vpn-status       Show status"
     Write-Host "  vpn-gui          Launch GUI manager"

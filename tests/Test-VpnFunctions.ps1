@@ -97,7 +97,7 @@ Write-Host "`n=== DuoMethod Resolution ===" -ForegroundColor Cyan
 # Test 1: Explicit param overrides config
 $DuoMethod = "passcode"
 $PSBoundParameters = @{ DuoMethod = "passcode" }
-$config = @{ DuoMethod = "phone" }
+$config = @{ DuoMethod = "passcode" }
 $effectiveDuo = $DuoMethod
 if (-not $PSBoundParameters.ContainsKey('DuoMethod') -and $config.DuoMethod) {
     $effectiveDuo = $config.DuoMethod
@@ -107,12 +107,12 @@ Assert-Equal $effectiveDuo "passcode" "Explicit param overrides config"
 # Test 2: Config value used when no explicit param
 $DuoMethod = "push"
 $PSBoundParameters = @{}
-$config = @{ DuoMethod = "phone" }
+$config = @{ DuoMethod = "passcode" }
 $effectiveDuo = $DuoMethod
 if (-not $PSBoundParameters.ContainsKey('DuoMethod') -and $config.DuoMethod) {
     $effectiveDuo = $config.DuoMethod
 }
-Assert-Equal $effectiveDuo "phone" "Config value used when no explicit param"
+Assert-Equal $effectiveDuo "passcode" "Config value used when no explicit param"
 
 # Test 3: Default push when no config and no param
 $DuoMethod = "push"
@@ -125,10 +125,9 @@ if (-not $PSBoundParameters.ContainsKey('DuoMethod') -and $config.DuoMethod) {
 Assert-Equal $effectiveDuo "push" "Default push when no config and no param"
 
 # Test 4: Method to vpncli input mapping
-$map = @{ "push" = "1"; "phone" = "2" }
+$map = @{ "push" = "1" }
 foreach ($method in $map.Keys) {
     $duoInput = "1"
-    if ($method -eq "phone") { $duoInput = "2" }
     Assert-Equal $duoInput $map[$method] "Method '$method' maps to vpncli input '$($map[$method])'"
 }
 
@@ -185,7 +184,9 @@ Write-Host "`n=== vpn-connect.cmd Parameter Binding ===" -ForegroundColor Cyan
 $cmdPath = Join-Path $PSScriptRoot "..\cmd\vpn-connect.cmd"
 if (Test-Path $cmdPath) {
     $cmdContent = Get-Content $cmdPath -Raw
-    Assert-Match $cmdContent '-DuoMethod %1' "vpn-connect.cmd forwards DuoMethod"
+    Assert-Match $cmdContent '-DuoMethod push' "vpn-connect.cmd still supports legacy push shorthand"
+    Assert-Match $cmdContent '-Connect %\*' "vpn-connect.cmd forwards explicit arguments to PowerShell"
+    Assert-Match $cmdContent '-Preset dku' "vpn-connect.cmd usage mentions DKU preset"
     Assert-Match $cmdContent 'if.*%~1.*==' "vpn-connect.cmd checks for empty arg"
     Assert-True ($cmdContent -notmatch 'sms') "vpn-connect.cmd no longer advertises sms"
 } else {
@@ -282,7 +283,6 @@ $ps1Path = Join-Path $PSScriptRoot "..\vpn-auto-connect.ps1"
 
 # Get-DuoCliInput
 Assert-Equal (Get-DuoCliInput -EffectiveDuo "push" -TotpCode "") "1" "Get-DuoCliInput push -> 1"
-Assert-Equal (Get-DuoCliInput -EffectiveDuo "phone" -TotpCode "") "2" "Get-DuoCliInput phone -> 2"
 Assert-Equal (Get-DuoCliInput -EffectiveDuo "passcode" -TotpCode "123456") "123456" "Get-DuoCliInput passcode -> TOTP"
 Assert-True (Test-SupportedDuoMethod -Method "push") "push remains a supported DUO method"
 Assert-True (-not (Test-SupportedDuoMethod -Method "sms")) "sms is no longer a supported DUO method"
@@ -300,6 +300,33 @@ $cfgLib = @{ Group = "Library Resources Only" }
 Assert-Equal (Get-VpnGroupSelection -Config $cfgLib) "1" "Library group maps to 1"
 $cfgEmpty = @{ Group = "" }
 Assert-Equal (Get-VpnGroupSelection -Config $cfgEmpty) "0" "Empty group -> 0"
+$groupMenuText = @"
+Group Selection
+0) -Default-
+1) Library Resources Only
+2) INTL-DUKE
+3) Protected Data
+"@
+$groupOptions = @(Get-VpnGroupMenuOptions -Text $groupMenuText)
+Assert-Equal $groupOptions.Count 4 "Group menu parser finds Cisco group options"
+Assert-Equal $groupOptions[2].Number "2" "Group menu parser keeps Duke group menu number"
+Assert-Equal (Get-VpnGroupComparisonKey -Name "Protected_Data") "protecteddata" "Group comparison normalizes underscore and spacing"
+$sessionGroup = @{
+    Buffer = (New-Object System.Text.StringBuilder)
+    Sync = (New-Object object)
+}
+[void]$sessionGroup.Buffer.AppendLine($groupMenuText)
+Assert-Equal (Get-VpnGroupSelection -Config @{ Group = "INTL-DUKE" } -Session $sessionGroup -MenuWaitSeconds 1) "2" "Dynamic group selection resolves Duke group names"
+Assert-Equal (Get-VpnGroupSelection -Config @{ Group = "Protected_Data" } -Session $sessionGroup -MenuWaitSeconds 1) "3" "Dynamic group selection tolerates spacing differences"
+Assert-Equal (Get-VpnGroupSelection -Config @{ Group = "INTL-DUKE" }) "2" "INTL-DUKE falls back to Duke menu number 2 when no group menu is available"
+$missingGroupOutput = try {
+    Get-VpnGroupSelection -Config @{ Group = "Missing Group" } -Session $sessionGroup -MenuWaitSeconds 1 | Out-String
+} catch {
+    ($_ | Out-String)
+}
+Assert-Match $missingGroupOutput 'Missing Group' "Missing VPN group error keeps the requested group name"
+$noMenuFallback = Get-VpnGroupSelection -Config @{ Group = "INTL-DUKE" } -MenuWaitSeconds 1
+Assert-Equal $noMenuFallback "2" "INTL-DUKE keeps the Duke fallback menu number without live Cisco group text"
 
 # Session status helpers
 Assert-Equal (Format-VpnSessionTimeSpan -TimeSpan ([TimeSpan]::FromSeconds(3661))) "1:01:01" "Session timespan formatting is stable"
@@ -313,6 +340,8 @@ Client Address (IPv4): 10.200.1.20
 "@
 Assert-Equal (Get-VpnSessionStatLine -Output $mockStatsOutput -Patterns @('Connection State:\s*(.+)')) "Connected" "Session stat parser reads state"
 Assert-Equal (Get-VpnSessionStatLine -Output $mockStatsOutput -Patterns @('Duration:\s*([0-9:]+)')) "1:23:45" "Session stat parser reads duration"
+Assert-Equal (Resolve-VpnStatusServer -Stats @{ Server = "vpn.duke.edu" } -FallbackServer "portal.dukekunshan.edu.cn") "vpn.duke.edu" "Status server prefers vpncli stats server"
+Assert-Equal (Resolve-VpnStatusServer -Stats @{ Server = "" } -FallbackServer "portal.dukekunshan.edu.cn") "portal.dukekunshan.edu.cn" "Status server falls back to expected server"
 
 $origVpnCliPath = $script:VpnCliPath
 $origStateFiles = $script:CiscoVpnStateFiles
@@ -340,35 +369,12 @@ Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Unknown"; ClientIP = ""
 Assert-Equal (Resolve-VpnDisplayState -Stats @{ State = "Disconnected"; ClientIP = "" } -Tunnel $null) "Disconnected" "Display state preserves non-Unknown state"
 Assert-Equal (Normalize-DuoPushTarget -Value "option 02") "2" "Push target normalizes to a DUO menu number"
 
-$pushText = @"
-1-Push to XXX-3808
-2-Push to XXX-4123
-3-Phone call
-"@
-$pushOptions = @(Get-DuoPushOptions -Text $pushText)
-Assert-Equal $pushOptions.Count 2 "Push option parser finds multiple push entries"
-Assert-Equal $pushOptions[0].Number "1" "First push option keeps menu number"
-Assert-Equal $pushOptions[1].Suffix "4123" "Push option parser extracts suffix"
-$selectedByNumber = Select-DuoPushOption -Options $pushOptions -ConfiguredTarget "2" -NonInteractive
-Assert-Equal $selectedByNumber.Number "2" "Push option selector matches configured DUO menu number"
-$singlePush = @(Get-DuoPushOptions -Text "1-Push to XXX-3808")
-Assert-Equal (Select-DuoPushOption -Options $singlePush -ConfiguredTarget "" -NonInteractive).Number "1" "Single push option auto-selects"
-
-$pushTextAlt = @"
-1) Duo Push to XXX-3808
-2) Duo Push to XXX-4123
-"@
-$pushOptionsAlt = @(Get-DuoPushOptions -Text $pushTextAlt)
-Assert-Equal $pushOptionsAlt.Count 2 "Push option parser handles alternate menu punctuation"
-Assert-Equal $pushOptionsAlt[0].Suffix "3808" "Push option parser keeps suffix from alternate format"
-
-$missingTargetOutput = (& { Select-DuoPushOption -Options $pushOptions -ConfiguredTarget "9" -NonInteractive } *>&1 | Out-String)
-Assert-Match $missingTargetOutput 'did not match' "Missing configured push number reports a clear error"
-Assert-Match $missingTargetOutput 'Detected DUO push options' "Missing configured push number prints detected options"
-
-$multiNonInteractiveOutput = (& { Select-DuoPushOption -Options $pushOptions -ConfiguredTarget "" -NonInteractive } *>&1 | Out-String)
-Assert-Match $multiNonInteractiveOutput 'Multiple DUO push targets detected' "Multiple push targets without config fail in non-interactive mode"
-Assert-Match $multiNonInteractiveOutput 'vpn-config set push-target' "Non-interactive failure suggests push-target config"
+# Connect path: configured push target or default menu 1 (no interactive phone selection)
+$configuredTarget = Normalize-DuoPushTarget -Value "2"
+$pushDuoWithTarget = if ($configuredTarget) { $configuredTarget } else { Get-DuoCliInput -EffectiveDuo "push" -TotpCode "" }
+Assert-Equal $pushDuoWithTarget "2" "Configured push target sends menu number"
+$pushDuoDefault = if ((Normalize-DuoPushTarget -Value "")) { (Normalize-DuoPushTarget -Value "") } else { Get-DuoCliInput -EffectiveDuo "push" -TotpCode "" }
+Assert-Equal $pushDuoDefault "1" "Unconfigured push target defaults to menu 1"
 
 $duoDiag = Get-DuoPromptDiagnostics -Text @"
 Header
@@ -573,9 +579,12 @@ Assert-Match $scriptText 'BannerFirstSendSeconds = 2' "Post-MFA banner confirmat
 Assert-Match $scriptText "StepLabel 'banner-certificate'" "Post-MFA banner/certificate y retry exists"
 Assert-Match $scriptText 'Start-Sleep -Seconds 3' "MFA pre-wait shortened to 3s"
 Assert-True ($scriptText -notmatch 'function Wait-ForDuoPushOptions') "Wait-ForDuoPushOptions helper removed"
+Assert-True ($scriptText -notmatch 'function Select-DuoPushOption') "Select-DuoPushOption removed"
+Assert-True ($scriptText -notmatch 'function Get-DuoPushOptions') "Get-DuoPushOptions removed"
+Assert-True ($scriptText -notmatch 'NonInteractiveMfa') "NonInteractiveMfa parameter removed"
 Assert-Match $scriptText 'Wait-ForVpnIpAfterExit -MaxSeconds 5' "Post-exit VPN IP grace shortened to 5s"
 Assert-True ($scriptText -notmatch "duo-retry") "Live connect path does not retry DUO input"
-Assert-True ($scriptText -notmatch 'sms') "PowerShell script no longer advertises sms"
+Assert-Match $scriptText 'ValidateSet\("push", "passcode"\)' "PowerShell script only exposes push and passcode"
 Assert-Match $scriptText 'menu number \(1/2/3' "PowerShell script documents push target as a menu number"
 Assert-True ($scriptText -notmatch 'Could not detect the DUO push menu') "PowerShell script no longer prints push-target fallback mismatch text"
 Assert-True ($scriptText -notmatch 'No vpncli MFA menu text was captured before fallback') "PowerShell script no longer prints empty MFA capture fallback text"
@@ -585,17 +594,30 @@ Assert-Match $scriptText 'Stop-VpnCliForFailureAndDrain' "Failure path drains vp
 Assert-Match $scriptText 'recent vpncli MFA buffer' "PowerShell script prints raw MFA buffer diagnostics"
 Assert-Match $scriptText 'Cisco log diagnostics' "PowerShell script prints Cisco log diagnostics"
 Assert-True ($scriptText -notmatch "Please tap 'Approve' on your DUO mobile push") "PowerShell script no longer prints duplicate push approval reminder"
+Assert-Match $scriptText 'function Resolve-VpnStatusServer' "PowerShell script defines shared status-server resolver"
+Assert-Match $scriptText '\[OK\] VPN connected: \$server' "vpn-status / connect success include resolved server in success text"
 
 $guiScript = Get-Content (Join-Path $PSScriptRoot "..\tools\vpn-gui.py") -Raw
 Assert-True ($guiScript -notmatch '"sms"|SMS') "GUI no longer offers sms"
+Assert-True ($guiScript -notmatch 'NonInteractiveMfa') "GUI connect no longer passes NonInteractiveMfa"
 Assert-Match $guiScript 'VPN_RESULT=\(CONNECTED\|DISCONNECTED\|FAILED\|TIMEOUT\)' "GUI parser accepts disconnect marker"
 Assert-Match $guiScript 'optional: default 1' "GUI PushTo placeholder documents default 1"
+Assert-Match $guiScript 'Duke VPN' "GUI includes Duke VPN preset"
+Assert-Match $guiScript 'DUKE_DEFAULT_GROUP = "INTL-DUKE"' "GUI Duke preset defaults to INTL-DUKE"
+Assert-Match $guiScript 'preset_dialog_height = "420x360" if edit_mode else "420x320"' "GUI preset dialogs use compact preset sizing"
+Assert-Match $guiScript 'vpn\.duke\.edu' "GUI Duke preset uses vpn.duke.edu"
+Assert-Match $guiScript 'INTL-DUKE' "GUI Duke preset includes Duke-specific group options"
 Assert-Match $guiScript 'delay_ms=1500' "GUI connected-stats refresh shortened to 1500ms"
-Assert-Match $guiScript 'max_seconds=20, interval=0\.5' "GUI Stage 2 VPN IP polling uses 0.5s interval"
+Assert-Match $guiScript '_poll_vpn_ip\(max_seconds=poll_seconds, interval=0\.5\)' "GUI Stage 2 VPN IP polling uses configurable timeout with 0.5s interval"
+Assert-Match $guiScript 'Stage 2 extended to .*Cisco is still downloading/updating components' "GUI extends Stage 2 when Cisco downloader is still running"
+Assert-Match $guiScript 'status_text = f"Connected: \{server\}" if server else "Connected"' "GUI connected status includes resolved server"
+Assert-Match $guiScript 'status_text = f"Disconnected: \{status_server\}" if status_server else "Disconnected"' "GUI disconnected status includes selected profile server"
+Assert-Match $guiScript 'def _resolve_status_server' "GUI defines shared status-server resolver for status labels"
 
 $readmeText = Get-Content (Join-Path $PSScriptRoot "..\README.md") -Raw
 Assert-True ($readmeText -notmatch 'push-target 3808|后 4 位|last 4 digits|preferred phone suffix') "README no longer documents phone-suffix push target"
 Assert-Match $readmeText 'push-target 1' "README documents push-target using DUO menu numbers"
+Assert-True ($readmeText -notmatch 'CLI will prompt you to choose|CLI 会提示你选择') "README no longer claims CLI interactive DUO selection"
 
 $diagNoAdapter = Get-VpnTunnelDiagnosticsText -CiscoAdapters @() -CiscoAddresses @() -TenAddresses @()
 Assert-Match $diagNoAdapter 'vpncli: unavailable' "Diagnostics show missing vpncli"
@@ -620,6 +642,92 @@ $ciscoAddr = [pscustomobject]@{ IPAddress = "10.200.1.20" }
 $diagUp = Get-VpnTunnelDiagnosticsText -CiscoAdapters @($upAdapter) -CiscoAddresses @($ciscoAddr) -TenAddresses @($ciscoAddr)
 Assert-Match $diagUp 'Cisco adapter: .*Up.*Cisco Secure Client' "Diagnostics show up Cisco adapter"
 Assert-Match $diagUp 'Cisco IPv4: 10\.200\.1\.20' "Diagnostics show Cisco IPv4"
+
+# ============================================================
+Write-Host "`n=== GUI-Aligned Profile Persistence ===" -ForegroundColor Cyan
+# ============================================================
+
+$profileTestDir = Join-Path $env:TEMP "vpn-profile-test-$(Get-Random)"
+New-Item -ItemType Directory -Path $profileTestDir -Force | Out-Null
+
+$origConfigDir = $ConfigDir
+$origCredFile = $CredFile
+$origConfigFile = $ConfigFile
+$origTotpFile = $TotpFile
+$origProfilesDir = $ProfilesDir
+$origProfilesIndex = $ProfilesIndex
+$origActiveProfileFile = $ActiveProfileFile
+$origVpnDiagnosticLogDir = $VpnDiagnosticLogDir
+
+try {
+    $ConfigDir = $profileTestDir
+    $CredFile = Join-Path $profileTestDir "credentials.xml"
+    $ConfigFile = Join-Path $profileTestDir "config.json"
+    $TotpFile = Join-Path $profileTestDir "totp.xml"
+    $ProfilesDir = Join-Path $profileTestDir "profiles"
+    $ProfilesIndex = Join-Path $profileTestDir "profiles.json"
+    $ActiveProfileFile = Join-Path $profileTestDir "active_profile"
+    $VpnDiagnosticLogDir = Join-Path $profileTestDir "logs"
+    New-Item -ItemType Directory -Path $ProfilesDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $VpnDiagnosticLogDir -Force | Out-Null
+
+    $created = Save-VpnProfileCore -Name "DKU VPN!" `
+        -Server "portal.dukekunshan.edu.cn" -Group "-Default-" -Port "443" -Protocol "ssl" `
+        -Username "netid" -Password "secret!" -DuoMethod "push" -PushTo "02" -SetActive
+
+    Assert-Equal $created.name "DKUVPN" "Profile name is sanitized for storage"
+    $createdConfig = Get-Content (Join-Path $ProfilesDir "DKUVPN\config.json") -Raw | ConvertFrom-Json
+    Assert-Equal $createdConfig.DuoMethod "push" "Profile save stores DUO Method"
+    Assert-Equal $createdConfig.DuoPushTarget "2" "Profile save normalizes PushTo into DuoPushTarget"
+    $createdCred = Get-Content (Join-Path $ProfilesDir "DKUVPN\credentials.xml") -Raw | ConvertFrom-Json
+    Assert-Equal $createdCred.Username "netid" "Profile save stores Username"
+    Assert-Equal (Decrypt-String $createdCred.Password) "secret!" "Profile save stores DPAPI password"
+    Assert-Equal (Get-Content $ActiveProfileFile -Raw).Trim() "DKUVPN" "Profile save updates active profile"
+
+    $beforePassword = $createdCred.Password
+    $updated = Save-VpnProfileCore -Name "DKUVPN" `
+        -Server "vpn.example.com" -Group "Library Resources Only" -Port "8443" -Protocol "ipsec" `
+        -Username "newuser" -DuoMethod "passcode" -PushTo "" -PreservePassword
+
+    $updatedConfig = Get-Content (Join-Path $ProfilesDir "DKUVPN\config.json") -Raw | ConvertFrom-Json
+    Assert-Equal $updatedConfig.Server "vpn.example.com" "Preserve-password update stores new server"
+    Assert-Equal $updatedConfig.Group "Library Resources Only" "Preserve-password update stores new group"
+    Assert-Equal $updatedConfig.Protocol "ipsec" "Preserve-password update stores new protocol"
+    Assert-Equal $updatedConfig.DuoMethod "passcode" "Preserve-password update stores new DUO Method"
+    Assert-True (-not ($updatedConfig.PSObject.Properties.Name -contains 'DuoPushTarget')) "Preserve-password update clears PushTo"
+    $updatedCred = Get-Content (Join-Path $ProfilesDir "DKUVPN\credentials.xml") -Raw | ConvertFrom-Json
+    Assert-Equal $updatedCred.Username "newuser" "Preserve-password update stores new username"
+    Assert-Equal $updatedCred.Password $beforePassword "Preserve-password update keeps encrypted password"
+
+    New-Item -ItemType File -Path (Join-Path $ProfilesDir "DKUVPN\totp.xml") -Force | Out-Null
+    $snapshot = Get-ProfileSnapshots
+    Assert-Equal $snapshot.activeProfile "DKUVPN" "Profile snapshot keeps active profile"
+    Assert-Equal $snapshot.profiles[0].displayName "DKUVPN" "Profile snapshot exposes display name"
+    Assert-Equal $snapshot.profiles[0].duoMethod "passcode" "Profile snapshot exposes DUO Method"
+    Assert-Equal $snapshot.profiles[0].pushTo "" "Profile snapshot exposes cleared PushTo"
+    Assert-True $snapshot.profiles[0].hasPassword "Profile snapshot exposes password status"
+    Assert-True $snapshot.profiles[0].hasTotp "Profile snapshot exposes TOTP status"
+
+    $dukeCreated = Save-VpnProfileCore -Name "duke" `
+        -Server "vpn.duke.edu" -Group "-Default-" -Port "443" -Protocol "ssl" `
+        -Username "dukeid" -Password "secret2" -DuoMethod "push" -PushTo "" -SetActive
+    Assert-Equal $dukeCreated.displayName "Duke VPN" "Profile snapshot maps duke display name"
+
+    Remove-VpnProfile -Name "DKUVPN" -Force
+    Assert-True (-not (Test-Path (Join-Path $ProfilesDir "DKUVPN"))) "Force remove deletes profile directory"
+    Remove-VpnProfile -Name "duke" -Force
+    Assert-True (-not (Test-Path $ActiveProfileFile)) "Force remove clears active profile when last profile is deleted"
+} finally {
+    $ConfigDir = $origConfigDir
+    $CredFile = $origCredFile
+    $ConfigFile = $origConfigFile
+    $TotpFile = $origTotpFile
+    $ProfilesDir = $origProfilesDir
+    $ProfilesIndex = $origProfilesIndex
+    $ActiveProfileFile = $origActiveProfileFile
+    $VpnDiagnosticLogDir = $origVpnDiagnosticLogDir
+    Remove-Item $profileTestDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # ============================================================
 Write-Host "`n========================================" -ForegroundColor Cyan

@@ -23,7 +23,7 @@ User configuration is encrypted with Windows DPAPI.
 |---|---|
 | One-click connect | `vpn-connect` completes login (~40s + DUO approval) |
 | GUI | `vpn-gui` or double-click `vpn-gui.bat` |
-| DUO 2FA | Push, Phone, or TOTP (passcode) |
+| DUO 2FA | Push or TOTP (passcode) |
 | Multi-phone DUO Push | Save a preferred DUO menu number for accounts with multiple DUO phones |
 | Multi-profile | `vpn-config add/use/rm/list` manage multiple VPNs |
 | TOTP full-auto | `vpn-config totp` + `vpn-connect passcode`, MFA without manual input |
@@ -66,7 +66,6 @@ cd cisco-vpn-autoconnect
 | Method | Command | Description |
 |---|---|---|
 | **Push** (recommended) | `vpn-connect` | Push to phone, tap Approve |
-| **Phone** | `vpn-connect phone` | Phone call verification |
 | **Passcode** (full auto) | `vpn-connect passcode` | Auto-generate 6-digit TOTP from saved secret |
 
 If your DUO account has multiple phone numbers, you can save a preferred push target with `vpn-config set push-target 1` or `2`.
@@ -82,10 +81,20 @@ This field is optional. Default is `1` when multiple push devices are shown. If 
 vpn-gui              # or double-click vpn-gui.bat
 ```
 
-1. Click `[+]` to add a profile, choose **DKU VPN** preset (Server / Port / Protocol prefilled)
-2. Enter NetID and Password, Group defaults to `-Default-`
-3. Save, click **Connect**, use **Configs** to view credentials and status
+![VPN Auto-Connect GUI — connected DKU profile with status, DUO method, and log](tools/gui.png)
+
+1. Click `[+]` to add a profile, choose **DKU VPN** preset
+2. Enter NetID and Password, then choose the appropriate DKU group
+3. Choose **DUO Method** for this profile, then save
 4. Optional: fill **PushTo** with your preferred Cisco DUO menu number only if your account has multiple DUO phones; default is `1`, and a single-phone account can leave it blank
+5. Click **Connect**. For DKU / Duke presets, the tool sends `connect <server>`, then Cisco plus the VPN server negotiate the lower-level protocol, and the saved group name is resolved from the live Cisco menu
+6. Use **Configs** to view `NetID`, password status, `Server`, `Group`, `DUO Method`, `PushTo`, and TOTP status
+   GUI also includes a **Duke VPN** preset with the same simplified form, using fixed server `vpn.duke.edu`; detailed Duke setup is explained later in this README.
+
+DKU preset groups:
+
+- `-Default-`
+- `Library Resources Only`
 
 ### CLI setup
 
@@ -93,28 +102,46 @@ vpn-gui              # or double-click vpn-gui.bat
 vpn-config add
 ```
 
-Enter when prompted:
+Enter when prompted (example values):
 
 ```
-Name:     dku
-Server:   portal.dukekunshan.edu.cn
-Group:    -Default-           (press Enter)
-Port:     443                 (press Enter)
-Protocol: ssl                 (press Enter)
+Profile name: dku
+Server:       portal.dukekunshan.edu.cn
+Group:        -Default-           (press Enter)
+Port:         443                 (press Enter)
+Protocol:     ssl                 (press Enter)
+Push target:  (optional; press Enter to skip)
+DUO method:   push                (press Enter)
+Username:     your-netid
+Password:     ********
 ```
 
-Then enter DKU credentials:
+You can also set push target later: `vpn-config set push-target 1`
 
-```
-Username: your-netid
-Password: ********
-```
-
-Optional DUO push target:
+### Duke VPN setup
 
 ```powershell
-vpn-config set push-target 1      # Optional; mainly for multiple DUO phones
+vpn-gui
 ```
+
+1. Click `[+]`, choose **Duke VPN**
+2. Enter NetID and Password
+3. Choose the appropriate Duke group. Start with `INTL-DUKE` (default)
+4. Choose **DUO Method**, save, then connect
+5. Duke preset connections send only `connect vpn.duke.edu`; Cisco and the Duke VPN service negotiate the lower-level protocol, and the script maps your saved group name to the live Cisco menu number at connect time
+6. On the first Duke connect, Cisco may spend extra time on update checks or component downloads before the tunnel IP appears; wait for the GUI to finish the extended status poll
+
+Duke preset groups:
+
+- `INTL-DUKE` (default)
+- `-Default-`
+- `Fuqua School of Business`
+- `Library Resources Only`
+- `Nicholas Internal`
+- `PRDN`
+- `Protected_Data`
+- `Public Safety`
+- `prod-test-1`
 
 ---
 
@@ -129,7 +156,9 @@ vpn-config set push-target 1      # Optional; mainly for multiple DUO phones
 
 ```powershell
 vpn              # List all commands
-vpn-connect      # Connect VPN (DUO Push)
+vpn-connect      # Connect active profile (DUO Push)
+vpn-connect -Preset dku
+vpn-connect -Preset duke -DuoMethod push
 vpn-disconnect   # Disconnect VPN
 vpn-status       # Show connection status
 ```
@@ -189,7 +218,7 @@ vpn-connect
 
 - Before connect, if **Cisco GUI** (`csc_ui`), `vpnui`, or another **vpncli** blocks the session, the script ends those processes
 - After connect, run `vpn-disconnect` to disconnect, the Cisco system-tray GUI restarts when done
-- If DUO Push shows multiple `Push to ...` options, the script uses the configured DUO menu number; otherwise CLI will prompt you to choose one
+- If DUO Push shows multiple `Push to ...` options, set `vpn-config set push-target N` or GUI **PushTo**; otherwise the script sends menu `1`
 
 ---
 
@@ -197,7 +226,7 @@ vpn-connect
 
 TOTP is a 6-digit code that rotates every 30 seconds, same as Google Authenticator (RFC 6238). `vpn-config totp` saves the Base32 secret locally, DPAPI encrypted.
 
-Push and Phone need action on your phone. `vpn-connect passcode` uses the saved secret to fill MFA automatically via `vpncli`.
+Push needs action on your phone. `vpn-connect passcode` uses the saved secret to fill MFA automatically via `vpncli`.
 
 > DKU VPN DUO QR codes are usually `duo://` activation links, not TOTP secrets. For DKU, use **DUO Push**.
 
@@ -241,6 +270,14 @@ vpn-connect passcode
 
 ---
 
+## Security
+
+- **Credential encryption**: Windows DPAPI (`CurrentUser` scope), only the current Windows user can decrypt
+- **Config directory permissions**: Restricted to the current user
+- **Do not commit credentials**: `.gitignore` excludes the config directory
+
+---
+
 ## File structure
 
 ```
@@ -269,16 +306,9 @@ cisco-vpn-autoconnect/
     ├── qrdecode.bat          # CLI launcher
     ├── qrgui.bat             # GUI launcher (calls qrgui.vbs)
     ├── qrgui.vbs             # Silent QR GUI launcher
-    └── vpn-gui.py            # VPN GUI manager
+    ├── vpn-gui.py            # VPN GUI manager
+    └── gui.png               # GUI screenshot (README)
 ```
-
----
-
-## Security
-
-- **Credential encryption**: Windows DPAPI (`CurrentUser` scope), only the current Windows user can decrypt
-- **Config directory permissions**: Restricted to the current user
-- **Do not commit credentials**: `.gitignore` excludes the config directory
 
 ---
 
@@ -305,7 +335,7 @@ Cisco Secure Client 自动连接工具，支持 DUO 2FA、多配置管理、GUI 
 |---|---|
 | 一键连接 | `vpn-connect` 自动完成登录（约 40s + DUO 审批） |
 | GUI 界面 | `vpn-gui` 或双击 `vpn-gui.bat` |
-| DUO 双因素 | Push / Phone / TOTP（passcode）三种方式 |
+| DUO 双因素 | Push / TOTP（passcode）两种方式 |
 | 多手机号 DUO Push | 多个 DUO 手机号时，可保存首选 DUO 菜单序号 |
 | 多配置管理 | `vpn-config add/use/rm/list` 管理多个 VPN 配置 |
 | TOTP 全自动 | `vpn-config totp` + `vpn-connect passcode`，MFA 无需手动操作 |
@@ -348,7 +378,6 @@ cd cisco-vpn-autoconnect
 | 方式 | 命令 | 说明 |
 |---|---|---|
 | **Push**（推荐） | `vpn-connect` | 推送通知到手机，点「Approve」通过 |
-| **Phone** | `vpn-connect phone` | 电话验证 |
 | **Passcode**（全自动） | `vpn-connect passcode` | 用本地 TOTP 密钥自动生成 6 位验证码 |
 
 如果你的 DUO 账号绑定了多个手机号，可以用 `vpn-config set push-target 1` 或 `2` 保存首选 DUO 菜单序号。
@@ -364,10 +393,20 @@ cd cisco-vpn-autoconnect
 vpn-gui              # 或双击 vpn-gui.bat
 ```
 
-1. 点 `[+]` 添加配置，选 **DKU VPN** 预设（Server / Port / Protocol 已填好）
-2. 填写 NetID 和 Password，Group 默认 `-Default-`
-3. 如有多个 DUO 手机号，可选填 **PushTo** 为想使用的 Cisco DUO 菜单序号；默认是 `1`，若只有一个手机可留空
-4. 保存后点 **Connect**，用 **Configs** 查看各配置的凭据和状态
+![VPN Auto-Connect GUI — 已连接 DKU 配置，含状态、DUO 方式与日志](tools/gui.png)
+
+1. 点 `[+]` 添加配置，选 **DKU VPN** 预设
+2. 填写 NetID 和 Password，然后选择对应的 DKU 组
+3. 先为当前配置选择 **DUO Method**，再保存
+4. 如有多个 DUO 手机号，可选填 **PushTo** 为想使用的 Cisco DUO 菜单序号；默认是 `1`，若只有一个手机可留空
+5. 保存后点 **Connect**。对于 DKU / Duke 预设，工具只发送 `connect <server>`，底层协议交给 Cisco 客户端和 VPN 服务端协商，已保存的组名会在连接时动态映射到 Cisco 当前菜单序号
+6. 用 **Configs** 查看 `NetID`、密码状态、`Server`、`Group`、`DUO Method`、`PushTo` 和 TOTP 状态
+   GUI 也提供 **Duke VPN** 预设，表单和 DKU 一样简化，服务器固定为 `vpn.duke.edu`；后文会详细说明 Duke 的配置流程。
+
+DKU 预设可选组：
+
+- `-Default-`
+- `Library Resources Only`
 
 ### 命令行配置
 
@@ -375,28 +414,46 @@ vpn-gui              # 或双击 vpn-gui.bat
 vpn-config add
 ```
 
-按提示输入：
+按提示输入（示例值）：
 
 ```
-Name:     dku
-Server:   portal.dukekunshan.edu.cn
-Group:    -Default-           (直接回车)
-Port:     443                 (直接回车)
-Protocol: ssl                 (直接回车)
+Profile name: dku
+Server:       portal.dukekunshan.edu.cn
+Group:        -Default-           (直接回车)
+Port:         443                 (直接回车)
+Protocol:     ssl                 (直接回车)
+Push target:  (可选，直接回车跳过)
+DUO method:   push                (直接回车)
+Username:     your-netid
+Password:     ********
 ```
 
-然后输入 DKU 账号密码：
+也可事后设置 Push 目标：`vpn-config set push-target 1`
 
-```
-Username: your-netid
-Password: ********
-```
-
-可选 DUO Push 目标：
+### Duke VPN 配置
 
 ```powershell
-vpn-config set push-target 1      # 可选，主要用于多个 DUO 手机号的情况
+vpn-gui
 ```
+
+1. 点 `[+]`，选择 **Duke VPN**
+2. 输入 NetID 和 Password
+3. 选择对应的 Duke 组，优先使用 `INTL-DUKE`（默认）
+4. 选择 **DUO Method**，保存后再连接
+5. Duke 预设连接时只发送 `connect vpn.duke.edu`；底层协议由 Cisco 和 Duke VPN 服务端协商，脚本会在连接时把你保存的组名映射成 Cisco 当前菜单里的正确序号
+6. 第一次连 Duke 时，Cisco 可能会先做更新检查或下载组件，隧道 IP 出现会更慢；等 GUI 的扩展状态轮询跑完再判断是否成功
+
+Duke 预设可选组：
+
+- `INTL-DUKE`（默认）
+- `-Default-`
+- `Fuqua School of Business`
+- `Library Resources Only`
+- `Nicholas Internal`
+- `PRDN`
+- `Protected_Data`
+- `Public Safety`
+- `prod-test-1`
 
 ---
 
@@ -411,7 +468,9 @@ vpn-config set push-target 1      # 可选，主要用于多个 DUO 手机号的
 
 ```powershell
 vpn              # 显示所有命令
-vpn-connect      # 连接 VPN（DUO Push）
+vpn-connect      # 连接当前激活 profile（DUO Push）
+vpn-connect -Preset dku
+vpn-connect -Preset duke -DuoMethod push
 vpn-disconnect   # 断开 VPN
 vpn-status       # 显示连接状态
 ```
@@ -470,7 +529,7 @@ vpn-connect
 
 - 连接前若 **Cisco GUI**（`csc_ui`）、`vpnui` 或其它 **vpncli** 占用连接功能，脚本会结束这些进程
 - 连接结束后执行 `vpn-disconnect` 即可断开，断开后会重启 Cisco 托盘 GUI
-- 如果 DUO Push 出现多个 `Push to ...` 选项，脚本会优先使用已保存的 DUO 菜单序号；未保存时，CLI 会提示你选择
+- 如果 DUO Push 出现多个 `Push to ...` 选项，请事先 `vpn-config set push-target N` 或在 GUI 填 **PushTo**；未配置时脚本发送菜单 `1`
 
 ---
 
@@ -478,7 +537,7 @@ vpn-connect
 
 TOTP 是 6 位动态验证码，和 Google Authenticator 里那种一样（RFC 6238，每 30 秒换一组）。`vpn-config totp` 把 Base32 密钥存到本地，DPAPI 加密。
 
-Push 和 Phone 要在手机上操作。`vpn-connect passcode` 则用本地密钥算出当前验证码，MFA 这一步可以全自动发给 `vpncli`。
+Push 需要在手机上点通过。`vpn-connect passcode` 则用本地密钥算出当前验证码，MFA 这一步可以全自动发给 `vpncli`。
 
 > DKU VPN 的 DUO 二维码多半是 `duo://` 激活链接，提不出 TOTP 密钥，一般只能用 **DUO Push**。
 
@@ -522,6 +581,14 @@ vpn-connect passcode
 
 ---
 
+## 安全说明
+
+- **凭据加密**：使用 Windows DPAPI（`CurrentUser` scope），仅当前 Windows 用户可解密
+- **配置目录权限**：自动设置为仅当前用户可访问
+- **不要提交凭据**：`.gitignore` 已排除配置目录
+
+---
+
 ## 文件结构
 
 ```
@@ -550,16 +617,9 @@ cisco-vpn-autoconnect/
     ├── qrdecode.bat          # CLI 入口
     ├── qrgui.bat             # GUI 入口（调用 qrgui.vbs）
     ├── qrgui.vbs             # 无窗口启动 QR GUI
-    └── vpn-gui.py            # VPN GUI 管理器
+    ├── vpn-gui.py            # VPN GUI 管理器
+    └── gui.png               # GUI 截图（README 用）
 ```
-
----
-
-## 安全说明
-
-- **凭据加密**：使用 Windows DPAPI（`CurrentUser` scope），仅当前 Windows 用户可解密
-- **配置目录权限**：自动设置为仅当前用户可访问
-- **不要提交凭据**：`.gitignore` 已排除配置目录
 
 ---
 
